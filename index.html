@@ -100,8 +100,10 @@ h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-.3px}
 .meta{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
 .lgw{display:flex;align-items:center;gap:6px;min-width:0}
 .lgw .lg{color:var(--mut);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lgn{font-size:12px;color:var(--mut);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .flag{font-size:17px;line-height:1;flex:none}
 .badge{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:2px 7px;white-space:nowrap;flex:none}
+.card .badge{font-size:13px;padding:3px 9px}
 .badge.t1{background:#ecfdf3;color:#067647}
 .badge.t2{background:#f2f4f7;color:#344054}
 .badge.t3{background:#fff;color:#667085;border:1px solid var(--line)}
@@ -785,7 +787,7 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     const when = g.alertAt ? `<span class="ago" data-t="${g.alertAt}">🔔 ${ago(g.alertAt)}</span>` : '<span>היה בפער מההתחלה</span>';
     const tr = (side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="nm">${esc(nm(g, side))}</span><span class="gl">${goals}</span></div>`;
     return `<a class="card${isNew ? ' new' : ''}" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener">` +
-      `<div class="meta"><span class="lgw">${leagueChips(g, true)}</span><span class="min">${esc(minuteTxt(g))}</span></div>` +
+      `<div class="meta"><span class="lgw">${leagueChips(g, false)}</span><span class="min">${esc(minuteTxt(g))}</span></div><div class="lgn">${esc(leagueTxt(g))}</div>` +
       `<div class="prog"><i style="width:${progress(g).toFixed(0)}%"></i></div>` +
       `<div class="board">${tr('h', g.h, leadHome)}${tr('a', g.a, !leadHome)}</div>` +
       `${pbox}<div class="foot">${when}<span class="go">פתח בפולימרקט ↗</span></div></a>`;
