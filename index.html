@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>⚽ בוט 2 שערים</title>
+</head>
+<body>
+<script>
+/* ⚽ בוט 2 שערים — Polymarket live soccer 2-goal-lead alert (runs inside a polymarket.com tab) */
+(async () => {
+  const GAMMA = 'https://gamma-api.polymarket.com';
+  const CLOB = 'https://clob.polymarket.com';
+  const WS_URL = 'wss://sports-api.polymarket.com/ws';
+  const MAIN_RE = /^[a-z0-9]+-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$/;
+  const BASE_TITLE = '⚽ בוט 2 שערים';
+  const WARMUP = 90e3;
+  const PLAY = new Set(['1H', 'HT', '2H', 'ET', 'ET1', 'ET2', '1ET', '2ET', 'BT', 'ETHT', 'PEN']);
+
+  const OLD = window.__bot2;
+  if (OLD && OLD.stop) { try { OLD.stop(); } catch (e) {} }
+  const SS_KEY = 'bot2';
+  const saved = (() => { try { return JSON.parse(sessionStorage.getItem(SS_KEY) || 'null') || {}; } catch (e) { return {}; } })();
+  const fresh = t => Date.now() - t < 6 * 3600e3;
+
+  const S = window.__bot2 = {
+    thr: (OLD && OLD.thr) || saved.thr || 2, games: new Map(), soccer: null, leagueName: {},
+    alerts: (OLD && OLD.alerts) || (saved.alerts || []).filter(a => a && fresh(a.t)),
+    alertedIds: (OLD && OLD.alertedIds) || saved.alertedIds || {},
+    ws: null, wsState: 'connecting', lastMsg: 0, backoff: 1000, closedAt: 0,
+    startedAt: Date.now(), audio: (OLD && OLD.audio) || null, soundOn: !!(OLD && OLD.soundOn), unseen: 0, flashTimer: null,
+    timers: [], stopped: false, snapState: 'idle', lastSnap: 0, renderPending: false, trapArmed: false,
+  };
+  for (const k of Object.keys(S.alertedIds)) if (!fresh(S.alertedIds[k])) delete S.alertedIds[k];
+  S.stop = () => {
+    S.stopped = true;
+    S.timers.forEach(clearInterval);
+    if (S.flashTimer) clearInterval(S.flashTimer);
+    if (S.onPop) window.removeEventListener('popstate', S.onPop);
+    try { S.ws && S.ws.close(); } catch (e) {}
+  };
+  const persist = () => { try { sessionStorage.setItem(SS_KEY, JSON.stringify({ thr: S.thr, alerts: S.alerts.slice(0, 50), alertedIds: S.alertedIds })); } catch (e) {} };
+
+  /* ---------- page ---------- */
+  const CSS = `
+:root{--bg:#f4f6fb;--card:#fff;--ink:#0f172a;--mut:#64748b;--line:#e6eaf2;--blue:#1652f0;--green:#12a150;--greenbg:#ebfaf2;--greenln:#bdecd1;--amber:#f59e0b;--red:#e11d48}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Heebo,Assistant,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto;padding:28px 20px 44px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+h1{margin:0;font-size:30px;font-weight:800;letter-spacing:-.3px}
+.sub{margin:4px 0 0;color:var(--mut);font-size:15px}
+.pill{background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 14px;font-size:14px;font-weight:600;white-space:nowrap}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:22px 0 14px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px 16px}
+.ctrl{display:flex;align-items:center;gap:10px;font-size:16px}
+.round{width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:#f8fafc;font-size:20px;cursor:pointer;line-height:1;color:var(--ink)}
+.round:hover{background:#eef2ff}
+.thr{font-size:24px;min-width:26px;text-align:center}
+.btns{display:flex;gap:8px;align-items:center}
+.cta{border:0;border-radius:14px;padding:12px 18px;font:inherit;font-size:16px;font-weight:700;cursor:pointer;background:var(--amber);color:#1f1300;box-shadow:0 6px 18px rgba(245,158,11,.35);animation:pulse 1.6s infinite}
+.cta.on{background:var(--greenbg);color:var(--green);box-shadow:none;animation:none;border:1px solid var(--greenln);cursor:default}
+.ghost{border:1px solid var(--line);background:#fff;border-radius:12px;padding:9px 12px;font:inherit;font-size:14px;cursor:pointer;color:var(--ink)}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;text-align:center}
+.kpi .n{font-size:34px;font-weight:800;line-height:1.1}
+.kpi .l{color:var(--mut);font-size:14px;margin-top:4px}
+.kpi.hot{background:var(--greenbg);border-color:var(--greenln)}
+.kpi.hot .n{color:var(--green)}
+h2{font-size:19px;margin:28px 0 10px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+h2 a{font-size:14px;font-weight:600;color:var(--blue);text-decoration:none}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.card{background:var(--card);border:2px solid var(--greenln);border-radius:20px;padding:16px 18px;box-shadow:0 6px 20px rgba(15,23,42,.05)}
+.card.flash{border-color:var(--amber);animation:glow 1s ease-in-out infinite alternate}
+@keyframes glow{from{box-shadow:0 0 0 0 rgba(245,158,11,0)}to{box-shadow:0 0 0 8px rgba(245,158,11,.28)}}
+.meta{display:flex;justify-content:space-between;align-items:center;color:var(--mut);font-size:13px;font-weight:600;gap:8px}
+.min{background:#fee2e2;color:var(--red);border-radius:8px;padding:2px 8px;font-weight:700;font-size:13px;white-space:nowrap;text-align:center}
+.board{direction:ltr;margin:12px 0 8px;display:flex;flex-direction:column;gap:6px}
+.tr{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#f6f8fc;border-radius:12px;padding:8px 12px}
+.tr .nm{font-size:17px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr .gl{font-size:26px;font-weight:800;min-width:22px;text-align:right}
+.tr.lead{background:var(--greenbg)}
+.tr.lead .nm,.tr.lead .gl{color:var(--green);font-weight:800}
+.lead{color:var(--green);font-weight:800!important}
+.price{font-size:15px;margin-top:6px}
+.price bdi,.math bdi{direction:ltr;unicode-bidi:isolate}
+.math{font-size:13px;color:var(--mut);margin-top:4px}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:13px;color:var(--mut);gap:8px}
+.go{background:var(--blue);color:#fff;text-decoration:none;border-radius:12px;padding:9px 14px;font-weight:700;font-size:14px;white-space:nowrap}
+.go:hover{filter:brightness(1.08)}
+.empty{grid-column:1/-1;background:var(--card);border:1px dashed #d5dbe7;border-radius:18px;padding:22px;text-align:center;color:var(--mut);font-size:15px}
+.list{background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
+.list .empty{border:0;border-radius:0}
+.row{display:grid;grid-template-columns:70px 1fr 160px;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid var(--line);font-size:15px}
+.row:first-child{border-top:0}
+.row.q{background:var(--greenbg)}
+.row .teams{direction:ltr;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .teams b{margin:0 10px}
+.row .lg{color:var(--mut);font-size:13px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.log{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:4px 16px}
+.log div{padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+.log div:first-child{border-top:0}
+footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-align:center}
+.tip{margin-top:14px;background:#eef3ff;border:1px solid #d6e2ff;color:#1e3a8a;border-radius:14px;padding:10px 14px;font-size:14px;text-align:center}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#0f172a;color:#fff;padding:12px 18px;border-radius:12px;font-size:15px;opacity:0;transition:.25s;pointer-events:none;z-index:9}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media (max-width:640px){.kpi .n{font-size:26px}.row{grid-template-columns:60px 1fr}.row .lg{display:none}h1{font-size:24px}}
+`;
+  const HTML = `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${BASE_TITLE}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='88'%3E%E2%9A%BD%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;600;700;800&display=swap"><style>${CSS}</style></head>
+<body><div class="wrap">
+<header class="top"><div><h1>⚽ בוט 2 שערים</h1><p class="sub">מצפצף כשקבוצה מובילה בפער של <b class="thrTxt">2</b>+ שערים · כדורגל חי בפולימרקט</p></div><div id="status" class="pill">🟡 מתחבר…</div></header>
+<section class="bar"><div class="ctrl"><span>התראה מפער של</span><button id="minus" class="round" title="פחות">−</button><b id="thr" class="thr">2</b><button id="plus" class="round" title="יותר">+</button><span>שערים</span></div>
+<div class="btns"><button id="test" class="ghost" style="display:none">🔈 בדיקת צליל</button><button id="enable" class="cta">🔔 הפעל צליל והתראות</button></div></section>
+<section class="kpis"><div class="kpi"><div class="n" id="kLive">–</div><div class="l">משחקים חיים</div></div><div class="kpi hot"><div class="n" id="kHot">–</div><div class="l">בפער <span class="thrTxt">2</span>+ עכשיו</div></div><div class="kpi"><div class="n" id="kAlerts">0</div><div class="l">התראות מאז שהופעל</div></div></section>
+<h2>🔥 פער <span class="thrTxt">2</span>+ עכשיו</h2><section id="hot" class="cards"></section>
+<h2>כל המשחקים החיים <a href="https://polymarket.com/sports/soccer/games" target="_blank" rel="noopener">לכל המשחקים בפולימרקט ↗</a></h2><section id="all" class="list"></section>
+<h2>📜 התראות אחרונות</h2><section id="log" class="log"></section>
+<div class="tip">💡 אפשר לרענן — הבוט חוזר לבד (רק ללחוץ שוב על הכפתור הכתום בשביל צליל). "פתח בפולימרקט" פותח טאב חדש, והבוט ממשיך לעבוד.</div>
+<footer>הבוט רק מתריע — לא קונה ולא מוכר.<br>התוצאות מגיעות מפולימרקט, לפעמים באיחור קטן.<br>כדי שיעבוד: להשאיר את הטאב הזה פתוח ואת המחשב ער.</footer>
+</div><div id="toast" class="toast"></div></body>`;
+  document.documentElement.innerHTML = HTML;
+  document.documentElement.setAttribute('dir', 'rtl');
+  document.documentElement.setAttribute('lang', 'he');
+  document.title = BASE_TITLE;
+
+  /* ---------- helpers ---------- */
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const num = x => { const n = parseFloat(x); return isFinite(n) ? n : null; };
+  const isEnded = g => !!g.ended || /^(FT|AET|POST|END|FIN)/i.test(g.period || '') || ['Final', 'Awarded', 'Canceled', 'Postponed', 'Abandoned'].includes(g.status);
+  const isPlay = g => g.h != null && !isEnded(g) && g.period !== 'SUS' && g.status !== 'Suspended' &&
+    (PLAY.has(g.period) || ['InProgress', 'Break', 'PenaltyShootout'].includes(g.status));
+  const diffOf = g => Math.abs(g.h - g.a);
+  const qual = g => isPlay(g) && diffOf(g) >= S.thr;
+  const nm = (g, side) => side === 'h' ? (g.homeAlias || g.home || g.homeName || '?') : (g.awayAlias || g.away || g.awayName || '?');
+  const minuteTxt = g => {
+    const p = g.period, e = String(g.elapsed == null ? '' : g.elapsed).trim();
+    if (p === 'HT') return 'מחצית';
+    if (p === 'PEN') return 'פנדלים';
+    if (p === 'BT' || p === 'ETHT') return 'הפסקה';
+    if (e) return `דקה ${e}'`;
+    if (p === '1H') return 'חצי ראשון';
+    if (p === '2H') return 'חצי שני';
+    if (/ET/.test(p || '')) return 'הארכה';
+    return p || '';
+  };
+  const shortMin = g => {
+    const p = g.period, e = String(g.elapsed == null ? '' : g.elapsed).trim();
+    if (p === 'HT') return 'מחצית';
+    if (p === 'PEN') return 'פנדלים';
+    return e ? `${e}'` : (p || '');
+  };
+  const leagueTxt = g => S.leagueName[g.league] || String(g.league || '').toUpperCase();
+  const hhmm = t => new Date(t).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+  const link = g => g.slug ? `https://polymarket.com/sports/${g.league}/${g.slug}` : 'https://polymarket.com/sports/soccer/games';
+  const getJSON = async url => { const r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); };
+
+  function leaderMarket(g) {
+    if (!g.mkts || !g.mkts.length || g.h === g.a) return null;
+    const leadHome = g.h > g.a;
+    const want = (leadHome ? [g.home, g.homeName] : [g.away, g.awayName]).filter(Boolean);
+    let m = g.mkts.find(x => want.includes(x.name));
+    if (!m) { const nd = g.mkts.filter(x => !/^draw/i.test(x.name)); m = leadHome ? nd[0] : nd[nd.length - 1]; }
+    return m || null;
+  }
+  function leaderInfo(g) {
+    const leadHome = g.h > g.a;
+    const leaderName = leadHome ? nm(g, 'h') : nm(g, 'a');
+    let cents = null;
+    const m = leaderMarket(g);
+    if (m) {
+      // live order-book ask first (what you'd pay right now), then the slower REST fields
+      const live = m.liveAt && Date.now() - m.liveAt < 120e3 ? m.liveAsk : null;
+      const p = [live, m.ask, m.yes, m.last].find(v => v != null && v > 0 && v < 1);
+      if (p != null) cents = p * 100;
+    }
+    return { leaderName, cents };
+  }
+  const fmtC = c => (c >= 99 || c < 1) ? String(Math.round(c * 10) / 10) : String(Math.round(c));
+
+  /* ---------- sound / notification / title ---------- */
+  const CAN_NOTIFY = ('Notification' in window) && window.isSecureContext && location.origin !== 'null';
+  const soundReady = () => { if (S.audio && S.audio.state === 'running' && !S.soundOn) { S.soundOn = true; render(); } };
+  function unlockAudio() {
+    try {
+      if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)();
+      if (S.audio.state === 'suspended') S.audio.resume().then(soundReady).catch(() => {});
+      else soundReady();
+    } catch (e) {}
+  }
+  function tones() {
+    const ctx = S.audio;
+    if (!ctx || ctx.state !== 'running') return false;
+    let t = ctx.currentTime + 0.05;
+    for (let r = 0; r < 2; r++) {
+      for (const f of [784, 1047, 1319]) {
+        const o = ctx.createOscillator(), v = ctx.createGain();
+        o.type = 'triangle'; o.frequency.value = f;
+        v.gain.setValueAtTime(0.0001, t);
+        v.gain.exponentialRampToValueAtTime(0.45, t + 0.02);
+        v.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+        o.connect(v); v.connect(ctx.destination);
+        o.start(t); o.stop(t + 0.25);
+        t += 0.18;
+      }
+      t += 0.35;
+    }
+    return true;
+  }
+  async function beep() {
+    try {
+      unlockAudio();
+      if (S.audio && S.audio.state !== 'running') { try { await S.audio.resume(); } catch (e) {} }
+      return tones();
+    } catch (e) { return false; }
+  }
+  function notify(g) {
+    try {
+      if (!CAN_NOTIFY || Notification.permission !== 'granted') return;
+      const L = leaderInfo(g);
+      const n = new Notification(`⚽ פער ${diffOf(g)}! ${nm(g, 'h')} ${g.h}–${g.a} ${nm(g, 'a')}`, {
+        body: `${minuteTxt(g)} · ${leagueTxt(g)}` + (L.cents != null ? ` · ${L.leaderName} לניצחון ≈ ${fmtC(L.cents)}¢` : ''),
+        tag: 'bot2-' + g.id, renotify: true, dir: 'rtl', lang: 'he',
+      });
+      n.onclick = () => { try { window.focus(); } catch (e) {} n.close(); };
+    } catch (e) {}
+  }
+  function flashTitle() {
+    if (!document.hidden && document.hasFocus()) return;
+    S.unseen++;
+    if (S.flashTimer) return;
+    let on = false;
+    S.flashTimer = setInterval(() => { on = !on; document.title = on ? `🔔 (${S.unseen}) פער ${S.thr}+!` : BASE_TITLE; }, 1000);
+  }
+  function stopFlash() {
+    if (S.flashTimer) { clearInterval(S.flashTimer); S.flashTimer = null; }
+    S.unseen = 0; document.title = BASE_TITLE;
+  }
+
+  /* ---------- alert logic ---------- */
+  function fireAlert(g) {
+    g.alerted = true; g.known = false; g.alertAt = Date.now(); g.flashUntil = Date.now() + 90e3;
+    S.alertedIds[g.id] = g.alertAt;
+    S.alerts.unshift({ t: g.alertAt, id: g.id, text: `${nm(g, 'h')} ${g.h}–${g.a} ${nm(g, 'a')} · ${minuteTxt(g)} · ${leagueTxt(g)}` });
+    if (S.alerts.length > 50) S.alerts.length = 50;
+    persist();
+    beep(); notify(g); flashTitle();
+    ensurePrice(g, true).then(scheduleRender);
+    scheduleRender();
+  }
+  function evaluate(g, prevDiff, src) {
+    if (!qual(g)) {
+      if (g.h == null || diffOf(g) < S.thr) {
+        g.alerted = false; g.known = false; g.alertAt = null;
+        // only a live (WebSocket) score may cancel an earlier alert — the REST snapshot can lag
+        if (src === 'ws' && S.alertedIds[g.id]) { delete S.alertedIds[g.id]; persist(); }
+      }
+      return;
+    }
+    if (g.alerted || g.known) return;
+    if (S.alertedIds[g.id]) { g.alerted = true; g.alertAt = S.alertedIds[g.id]; return; }
+    const warm = Date.now() - S.startedAt < WARMUP;
+    const sawLower = prevDiff != null && prevDiff < S.thr;
+    if (sawLower || !warm) fireAlert(g); else g.known = true;
+  }
+  function setThr(v) {
+    v = Math.max(1, Math.min(5, v));
+    if (v === S.thr) return;
+    S.thr = v;
+    for (const g of S.games.values()) {
+      if (qual(g)) { if (!g.alerted) g.known = true; }
+      else { g.alerted = false; g.known = false; g.alertAt = null; delete S.alertedIds[g.id]; }
+    }
+    persist();
+    render();
+  }
+  function toast(msg) {
+    const t = $('toast'); if (!t) return;
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(S.toastT); S.toastT = setTimeout(() => t.classList.remove('show'), 3500);
+  }
+  // one accidental "back" (e.g. a trackpad swipe) won't close the bot
+  function armTrap() {
+    if (S.trapArmed) return; S.trapArmed = true;
+    try { history.pushState({ bot2: 1 }, '', location.href); } catch (e) {}
+  }
+  S.onPop = () => { try { history.pushState({ bot2: 1 }, '', location.href); } catch (e) {} toast('🙂 הבוט נשאר פה. כדי לסגור אותו — סוגרים את הטאב'); };
+  window.addEventListener('popstate', S.onPop);
+
+  /* ---------- data ---------- */
+  function teamsFromTitle(title) { const p = String(title || '').split(/\s+vs\.?\s+/i); return p.length === 2 ? p.map(s => s.trim()) : [null, null]; }
+  function applyEvent(g, e) {
+    if (e.slug) g.slug = e.slug;
+    if (!g.league && e.slug) g.league = e.slug.split('-')[0];
+    const [hn, an] = teamsFromTitle(e.title);
+    if (hn) { g.homeName = hn; g.awayName = an; }
+    if (!g.home) g.home = hn;
+    if (!g.away) g.away = an;
+    for (const t of (e.teams || [])) {
+      if (!t || !t.name) continue;
+      if (t.name === g.home || t.name === hn) g.homeAlias = t.alias || null;
+      if (t.name === g.away || t.name === an) g.awayAlias = t.alias || null;
+    }
+    const mk = (e.markets || []).filter(m => !m.sportsMarketType || /moneyline/i.test(m.sportsMarketType));
+    const prevLive = {};
+    for (const m of (g.mkts || [])) if (m.tok && m.liveAt) prevLive[m.tok] = m;
+    g.mkts = mk.map(m => {
+      let yes = null, tok = null;
+      try { yes = num(JSON.parse(m.outcomePrices || '[]')[0]); } catch (x) {}
+      try { tok = JSON.parse(m.clobTokenIds || '[]')[0] || null; } catch (x) {}
+      const o = { name: m.groupItemTitle || '', ask: num(m.bestAsk), yes, last: num(m.lastTradePrice), tok };
+      const p = tok && prevLive[tok];
+      if (p) { o.liveAsk = p.liveAsk; o.liveBid = p.liveBid; o.liveAt = p.liveAt; }
+      return o;
+    });
+  }
+  async function ensurePrice(g, force) {
+    if (g.loading) return;
+    if (!force && g.priceAt && Date.now() - g.priceAt < 25e3) return;
+    g.loading = true;
+    try {
+      if (!g.mkts || !g.mkts.some(m => m.tok)) {
+        let e = null;
+        if (g.slug) { const arr = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(g.slug)}`); e = arr && arr[0]; }
+        if (!e) {
+          const arr = (await getJSON(`${GAMMA}/events?game_id=${g.id}`)) || [];
+          const mains = arr.filter(x => MAIN_RE.test(x.slug || ''));
+          e = (mains.length ? mains : arr).slice().sort((a, b) => (a.slug || '').length - (b.slug || '').length)[0];
+        }
+        if (e) applyEvent(g, e);
+      }
+      const m = leaderMarket(g);
+      if (m && m.tok) {
+        const b = await getJSON(`${CLOB}/book?token_id=${encodeURIComponent(m.tok)}`);
+        const asks = (b.asks || []).map(x => +x.price).filter(v => isFinite(v)).sort((x, y) => x - y);
+        const bids = (b.bids || []).map(x => +x.price).filter(v => isFinite(v)).sort((x, y) => y - x);
+        m.liveAsk = asks.length ? asks[0] : null; m.liveBid = bids.length ? bids[0] : null; m.liveAt = Date.now();
+      }
+      g.priceAt = Date.now();
+      g.priceFail = !m;
+    } catch (x) { g.priceFail = true; g.priceAt = Date.now(); }
+    g.loading = false;
+  }
+  async function loadSports() {
+    try {
+      const sp = await getJSON(`${GAMMA}/sports`);
+      const set = new Set();
+      for (const s of sp) {
+        const code = String(s.sport || '').toLowerCase();
+        if (!code) continue;
+        S.leagueName[code] = s.name;
+        if (String(s.tags || '').split(',').includes('100350')) set.add(code);
+      }
+      if (set.size) S.soccer = set;
+    } catch (e) { S.sportsErr = String(e); }
+  }
+  async function snapshot() {
+    S.snapState = 'loading';
+    try {
+      const base = `${GAMMA}/events?tag_id=100350&closed=false&live=true&order=startTime&ascending=false&limit=100`;
+      let all = [];
+      for (let off = 0; off < 500; off += 100) {
+        const arr = await getJSON(base + '&offset=' + off);
+        all = all.concat(arr);
+        if (arr.length < 100) break;
+      }
+      const now = Date.now();
+      for (const e of all) {
+        if (!MAIN_RE.test(e.slug || '') || e.gameId == null || !PLAY.has(e.period)) continue;
+        const sc = /^(\d+)-(\d+)$/.exec(String(e.score || '').trim());
+        if (!sc) continue;
+        let g = S.games.get(e.gameId);
+        const isNew = !g;
+        if (!g) { g = { id: e.gameId, firstSeen: now }; S.games.set(e.gameId, g); }
+        g.league = (e.slug.split('-')[0] || '').toLowerCase();
+        applyEvent(g, e);
+        if (isNew || !g.wsAt || g.wsAt < S.snapStart) {
+          const prev = g.h != null ? diffOf(g) : null;
+          g.h = +sc[1]; g.a = +sc[2]; g.period = e.period; g.elapsed = e.elapsed; g.live = e.live; g.ended = e.ended; g.lastSeen = now;
+          evaluate(g, prev, 'snap');
+        }
+      }
+      S.snapState = 'ok'; S.lastSnap = now; S.snapCount = all.length;
+      for (const g of S.games.values()) if (qual(g)) ensurePrice(g, true).then(scheduleRender);
+    } catch (x) { S.snapState = 'err'; S.snapErr = String(x); }
+    scheduleRender();
+  }
+  function onGame(m) {
+    if (!m || m.gameId == null) return;
+    const lg = String(m.leagueAbbreviation || '').toLowerCase();
+    if (S.soccer ? !S.soccer.has(lg) : !PLAY.has(m.period)) return;
+    const sc = /^(\d+)-(\d+)$/.exec(String(m.score || '').trim());
+    let g = S.games.get(m.gameId);
+    if (!g) { if (!sc) return; g = { id: m.gameId, firstSeen: Date.now() }; S.games.set(m.gameId, g); }
+    const prev = g.h != null ? diffOf(g) : null;
+    if (m.homeTeam) g.home = m.homeTeam;
+    if (m.awayTeam) g.away = m.awayTeam;
+    for (const k of ['status', 'period', 'elapsed', 'live', 'ended']) if (m[k] !== undefined && m[k] !== null) g[k] = m[k];
+    if (m.slug && MAIN_RE.test(m.slug)) g.slug = m.slug;
+    if (sc) { g.h = +sc[1]; g.a = +sc[2]; }
+    g.league = lg; g.lastSeen = g.wsAt = Date.now();
+    evaluate(g, prev, 'ws');
+    scheduleRender();
+  }
+  S.onGame = onGame;
+
+  function connect() {
+    if (S.stopped) return;
+    S.wsState = 'connecting'; renderStatus();
+    let ws;
+    try { ws = new WebSocket(WS_URL); } catch (e) { S.wsState = 'closed'; return setTimeout(connect, 5000); }
+    S.ws = ws;
+    ws.onopen = () => {
+      S.wsState = 'open'; S.lastMsg = Date.now(); S.backoff = 1000; renderStatus();
+      // after a long disconnect, resync scores (max once per 10 min)
+      if (S.closedAt && Date.now() - S.closedAt > 60e3 && Date.now() - S.lastSnap > 10 * 60e3) { S.snapStart = Date.now(); snapshot(); }
+      S.closedAt = 0;
+    };
+    ws.onmessage = ev => {
+      S.lastMsg = Date.now();
+      if (ev.data === 'ping') { if (ws.readyState === 1) ws.send('pong'); return; }
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      (Array.isArray(m) ? m : [m]).forEach(onGame);
+    };
+    ws.onclose = () => {
+      if (S.ws !== ws) return;
+      S.wsState = 'closed'; if (!S.closedAt) S.closedAt = Date.now(); renderStatus();
+      if (!S.stopped) setTimeout(connect, S.backoff = Math.min(S.backoff * 2, 30e3));
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  /* ---------- render ---------- */
+  function cardHTML(g) {
+    const L = leaderInfo(g), leadHome = g.h > g.a;
+    const flash = g.flashUntil && Date.now() < g.flashUntil;
+    let price = `<div class="price">💰 טוען מחיר…</div>`;
+    if (L.cents != null) {
+      const c = fmtC(L.cents), up = fmtC(100 - L.cents);
+      price = `<div class="price">💰 מחיר לניצחון של המובילה: <b><bdi>${c}¢</bdi></b></div>` +
+        `<div class="math">אם מנצחת: <bdi>+${up}¢</bdi> · אם לא: <bdi>−${c}¢</bdi> (לכל מניה)</div>`;
+    } else if (g.priceFail) price = '';
+    const when = g.alertAt ? `🔔 התראה ב-${hhmm(g.alertAt)}` : 'היה בפער מההתחלה';
+    const tr = (side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="nm">${esc(nm(g, side))}</span><span class="gl">${goals}</span></div>`;
+    return `<div class="card${flash ? ' flash' : ''}"><div class="meta"><span>${esc(leagueTxt(g))}</span><span class="min">${esc(minuteTxt(g))}</span></div>` +
+      `<div class="board">${tr('h', g.h, leadHome)}${tr('a', g.a, !leadHome)}</div>` +
+      `${price}<div class="foot"><span>${when}</span><a class="go" href="${esc(link(g))}" target="_blank" rel="noopener">פתח בפולימרקט ↗</a></div></div>`;
+  }
+  function rowHTML(g) {
+    const q = qual(g), leadHome = g.h > g.a;
+    return `<div class="row${q ? ' q' : ''}"><span class="min">${esc(shortMin(g))}</span>` +
+      `<span class="teams"><span class="${q && leadHome ? 'lead' : ''}">${esc(nm(g, 'h'))}</span><b>${g.h}–${g.a}</b><span class="${q && !leadHome ? 'lead' : ''}">${esc(nm(g, 'a'))}</span></span>` +
+      `<span class="lg">${esc(leagueTxt(g))}</span></div>`;
+  }
+  function renderStatus() {
+    const el = $('status'); if (!el) return;
+    const age = Date.now() - S.lastMsg;
+    if (S.wsState === 'open' && age < 20e3) el.textContent = '🟢 מחובר · זמן אמת';
+    else if (S.wsState === 'closed') el.textContent = '🔴 מנותק · מתחבר מחדש…';
+    else el.textContent = '🟡 מתחבר…';
+  }
+  function renderEnable() {
+    const b = $('enable'), t = $('test');
+    if (!S.soundOn) { b.className = 'cta'; b.textContent = CAN_NOTIFY ? '🔔 הפעל צליל והתראות' : '🔔 לחץ להפעלת צליל'; t.style.display = 'none'; return; }
+    const np = CAN_NOTIFY ? Notification.permission : 'na';
+    b.className = 'cta on';
+    b.textContent = np === 'granted' ? '✅ צליל + התראות פעילים' : np === 'denied' ? '✅ צליל פעיל · התראות חסומות' : '✅ צליל פעיל';
+    t.style.display = '';
+  }
+  function render() {
+    S.renderPending = false;
+    const play = [...S.games.values()].filter(isPlay);
+    const hot = play.filter(qual).sort((x, y) => (y.alertAt || 0) - (x.alertAt || 0) || diffOf(y) - diffOf(x));
+    $('kLive').textContent = play.length;
+    $('kHot').textContent = hot.length;
+    $('kAlerts').textContent = S.alerts.length;
+    $('thr').textContent = S.thr;
+    document.querySelectorAll('.thrTxt').forEach(el => { el.textContent = S.thr; });
+    $('hot').innerHTML = hot.length ? hot.map(cardHTML).join('') : `<div class="empty">אין כרגע משחק בפער ${S.thr}+ · הבוט מקשיב 👂</div>`;
+    const rows = play.slice().sort((x, y) => (qual(y) - qual(x)) || (diffOf(y) - diffOf(x)) || ((parseInt(y.elapsed, 10) || 0) - (parseInt(x.elapsed, 10) || 0)));
+    const warming = Date.now() - S.startedAt < WARMUP || S.snapState === 'loading';
+    $('all').innerHTML = rows.length ? rows.map(rowHTML).join('') : `<div class="empty">${warming ? 'אוסף משחקים חיים… (עד דקה)' : 'אין כרגע משחקי כדורגל חיים'}</div>`;
+    $('log').innerHTML = S.alerts.length
+      ? S.alerts.slice(0, 12).map(a => `<div>${hhmm(a.t)} · <bdi>${esc(a.text)}</bdi></div>`).join('')
+      : '<div style="color:var(--mut)">עוד אין התראות</div>';
+    renderStatus(); renderEnable();
+  }
+  function scheduleRender() { if (S.renderPending) return; S.renderPending = true; setTimeout(render, 800); }
+  S.render = render;
+
+  /* ---------- wiring ---------- */
+  $('minus').onclick = () => setThr(S.thr - 1);
+  $('plus').onclick = () => setThr(S.thr + 1);
+  $('enable').onclick = async () => {
+    S.soundOn = true; render();
+    await beep();
+    if (CAN_NOTIFY && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) {} }
+    render();
+  };
+  $('test').onclick = () => { beep(); };
+  document.addEventListener('pointerdown', () => { unlockAudio(); armTrap(); }, true);
+  window.addEventListener('focus', stopFlash);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && document.hasFocus()) stopFlash(); });
+
+  S.timers.push(setInterval(() => {
+    const now = Date.now();
+    for (const [id, g] of S.games) {
+      const age = now - (g.lastSeen || 0);
+      if (isEnded(g) ? age > 3 * 60e3 : age > (g.period === 'HT' ? 45 : 35) * 60e3) S.games.delete(id);
+    }
+    for (const g of S.games.values()) if (qual(g)) ensurePrice(g).then(scheduleRender);
+    if (S.ws && S.wsState === 'open' && now - S.lastMsg > 25e3) { try { S.ws.close(); } catch (e) {} }
+    scheduleRender();
+  }, 30e3));
+  S.timers.push(setInterval(renderStatus, 5e3));
+
+  try { if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)(); if (S.audio.state === 'running') S.soundOn = true; } catch (e) {}
+  render();
+  await loadSports();
+  connect();
+  S.snapStart = Date.now();
+  snapshot();
+  return 'bot2 started';
+})();
+
+</script>
+</body>
+</html>
