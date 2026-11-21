@@ -466,6 +466,7 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     const b = $('enable'), t = $('test');
     if (!S.soundOn) { b.className = 'cta'; b.textContent = CAN_NOTIFY ? '🔔 הפעל צליל והתראות' : '🔔 לחץ להפעלת צליל'; t.style.display = 'none'; return; }
     const np = CAN_NOTIFY ? Notification.permission : 'na';
+    if (np === 'default') { b.className = 'cta'; b.textContent = '🔔 הפעל גם הודעות קופצות'; t.style.display = ''; return; }
     b.className = 'cta on';
     b.textContent = np === 'granted' ? '✅ צליל + התראות פעילים' : np === 'denied' ? '✅ צליל פעיל · התראות חסומות' : '✅ צליל פעיל';
     t.style.display = '';
