@@ -26,10 +26,12 @@
   const SS_KEY = 'bot2';
   const saved = (() => { try { return JSON.parse(sessionStorage.getItem(SS_KEY) || 'null') || {}; } catch (e) { return {}; } })();
   const fresh = t => Date.now() - t < 6 * 3600e3;
+  const prefs = (() => { try { return JSON.parse(localStorage.getItem('bot2prefs') || 'null') || {}; } catch (e) { return {}; } })();
 
   const S = window.__bot2 = {
-    thr: (OLD && OLD.thr) || saved.thr || 2, muted: OLD ? !!OLD.muted : !!saved.muted,
-    games: new Map(), soccer: null, leagueName: {},
+    thr: OLD ? OLD.thr : (prefs.thr || saved.thr || 2), exact: OLD ? !!OLD.exact : !!prefs.exact, minFrom: OLD ? (OLD.minFrom || 0) : (+prefs.minFrom || 0),
+    muted: OLD ? !!OLD.muted : !!(prefs.muted != null ? prefs.muted : saved.muted),
+    games: new Map(), soccer: null, leagueName: {}, leagueImg: {},
     alerts: (OLD && OLD.alerts) || (saved.alerts || []).filter(a => a && fresh(a.t)),
     alertedIds: (OLD && OLD.alertedIds) || saved.alertedIds || {},
     ws: null, wsState: 'connecting', lastMsg: 0, backoff: 1000, closedAt: 0,
@@ -49,7 +51,10 @@
     try { S.ws && S.ws.close(); } catch (e) {}
     try { S.mws && S.mws.close(); } catch (e) {}
   };
-  const persist = () => { try { sessionStorage.setItem(SS_KEY, JSON.stringify({ thr: S.thr, muted: S.muted, alerts: S.alerts.slice(0, 50), alertedIds: S.alertedIds })); } catch (e) {} };
+  const persist = () => {
+    try { sessionStorage.setItem(SS_KEY, JSON.stringify({ thr: S.thr, muted: S.muted, alerts: S.alerts.slice(0, 50), alertedIds: S.alertedIds })); } catch (e) {}
+    try { localStorage.setItem('bot2prefs', JSON.stringify({ thr: S.thr, exact: S.exact, minFrom: S.minFrom, muted: S.muted })); } catch (e) {}
+  };
 
   /* ---------- page ---------- */
   const CSS = `
@@ -83,6 +88,15 @@ h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-.3px}
 .cta{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;margin:18px 0 0;border:0;border-radius:14px;padding:13px 18px;font:inherit;font-size:16px;font-weight:700;cursor:pointer;background:var(--amber);color:#fff}
 .cta:hover{filter:brightness(1.05)}
 .cta.soft{background:#fff;color:var(--blue);border:1px solid var(--line);font-weight:600}
+.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px;padding:10px 12px;background:var(--soft);border:1px solid var(--line);border-radius:14px}
+.controls .lbl{font-size:14px;color:var(--mut);font-weight:700}
+.seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:999px;padding:3px}
+.seg button{border:0;background:transparent;padding:6px 12px;border-radius:999px;font:inherit;font-size:14px;cursor:pointer;color:var(--mut)}
+.seg button.on{background:var(--ink);color:#fff;font-weight:700}
+.selw{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:3px 6px 3px 12px;font-size:14px;color:var(--mut)}
+.selw select{border:0;background:transparent;font:inherit;font-size:15px;font-weight:700;color:var(--ink);cursor:pointer;outline:none;padding:3px 2px}
+.summary{margin-inline-start:auto;font-size:13px;color:var(--mut)}
+.badge.wt{background:var(--amberbg);color:#b54708}
 .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:20px}
 .kpi{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;text-align:center}
 .kpi .n{font-size:30px;font-weight:800;line-height:1.1}
@@ -102,6 +116,12 @@ h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-.3px}
 .lgw .lg{color:var(--mut);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lgn{font-size:12px;color:var(--mut);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .flag{font-size:17px;line-height:1;flex:none}
+.ll{width:18px;height:18px;object-fit:contain;flex:none}
+.card .ll{width:22px;height:22px}
+.tn{display:flex;align-items:center;gap:8px;min-width:0}
+.tl{position:relative;display:inline-block;flex:none;border-radius:6px;overflow:hidden}
+.tl .ini{position:absolute;inset:0;display:grid;place-items:center;color:#fff;font-style:normal;font-weight:800;letter-spacing:-.3px}
+.tl img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 .badge{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:2px 7px;white-space:nowrap;flex:none}
 .card .badge{font-size:13px;padding:3px 9px}
 .badge.t1{background:#ecfdf3;color:#067647}
@@ -156,8 +176,9 @@ h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-.3px}
 .row{display:grid;grid-template-columns:62px 1fr 64px 230px;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--line);font-size:15px}
 .row:first-child{border-top:0}
 .row:hover{background:var(--soft)}
-.row .teams{direction:ltr;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row .teams b{margin:0 10px}
+.row .teams{direction:ltr;display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;white-space:nowrap}
+.row .teams .tnm{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.row .teams b{margin:0 6px;flex:none}
 .ld{font-weight:800}
 .lgc{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-width:0;direction:rtl}
 .lgc .lg{color:var(--mut);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -191,22 +212,28 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap"><style>${CSS}</style></head>
 <body><div class="wrap">
 <header class="top">
-  <div class="brand"><div class="logo">⚽</div><div><h1>בוט 2 שערים</h1><p class="sub">מתריע כשקבוצה מובילה ב-<b class="thrPlus" dir="ltr">2+</b> שערים · כדורגל חי בפולימרקט</p></div></div>
+  <div class="brand"><div class="logo">⚽</div><div><h1>בוט 2 שערים</h1><p class="sub">מתריע כשקבוצה מובילה <span class="cond"></span> · כדורגל חי בפולימרקט</p></div></div>
   <div class="tools">
-    <div class="stepper" title="מאיזה פער להתריע"><span>התראה מפער</span><button id="minus" aria-label="פחות">−</button><b id="thr">2</b><button id="plus" aria-label="יותר">+</button></div>
     <button id="snd" class="icon" title="צליל">🔔</button>
     <div id="live" class="livepill" title=""><span class="dot"></span><span id="liveTx">מתחבר…</span></div>
   </div>
 </header>
+<section class="controls" aria-label="הגדרות התראה">
+  <span class="lbl">התראה כש:</span>
+  <div class="stepper" title="מאיזה פער להתריע"><span>פער</span><button id="minus" aria-label="פחות">−</button><b id="thr">2</b><button id="plus" aria-label="יותר">+</button></div>
+  <div class="seg" role="group" title="פער מדויק או ומעלה"><button id="exOff">ומעלה</button><button id="exOn">פער מדויק</button></div>
+  <label class="selw" title="רק משחקים מהדקה הזו והלאה"><span>החל מדקה</span><select id="minSel"><option value="0">כל המשחק</option><option value="15">15</option><option value="30">30</option><option value="45">45</option><option value="60">60</option><option value="70">70</option><option value="75">75</option><option value="80">80</option><option value="85">85</option><option value="90">90</option></select></label>
+  <span class="summary" id="summary"></span>
+</section>
 <button id="cta" class="cta" hidden></button>
 <section class="kpis">
-  <div class="kpi hot"><div class="n" id="kHot">–</div><div class="l">בפער <span class="thrPlus" dir="ltr">2+</span></div></div>
+  <div class="kpi hot"><div class="n" id="kHot">–</div><div class="l"><span class="cond"></span></div></div>
   <div class="kpi"><div class="n" id="kWarm">–</div><div class="l">קרוב לפער</div></div>
   <div class="kpi"><div class="n" id="kLive">–</div><div class="l">משחקים חיים</div></div>
 </section>
-<h2 class="sec"><span><i class="sdot g"></i>בפער <span class="thrPlus" dir="ltr">2+</span> עכשיו</span></h2>
+<h2 class="sec"><span><i class="sdot g"></i>עומדים בתנאי עכשיו</span><span class="hint cond"></span></h2>
 <section id="hot" class="cards"></section>
-<h2 class="sec" id="warmH"><span><i class="sdot a"></i>קרוב לפער</span><span class="hint" id="warmHint">קבוצה מובילה, אבל עוד לא בפער של 2</span></h2>
+<h2 class="sec" id="warmH"><span><i class="sdot a"></i>קרוב לפער</span><span class="hint" id="warmHint">קבוצה מובילה, אבל עוד לא עומד בתנאי</span></h2>
 <section id="warm" class="list"></section>
 <button id="coldBtn" class="more" hidden></button>
 <section id="cold" class="list" hidden style="margin-top:10px"></section>
@@ -234,8 +261,14 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
   const isPlay = g => g.h != null && !isEnded(g) && g.period !== 'SUS' && g.status !== 'Suspended' &&
     (PLAY.has(g.period) || ['InProgress', 'Break', 'PenaltyShootout'].includes(g.status));
   const diffOf = g => Math.abs(g.h - g.a);
-  const qual = g => isPlay(g) && diffOf(g) >= S.thr;
-  const warmQ = g => isPlay(g) && diffOf(g) >= 1 && diffOf(g) < S.thr;
+  const minuteOf = g => { const e = parseInt(g.elapsed, 10); if (g.period === 'HT') return 45; if (isFinite(e)) return e; if (g.period === '2H') return 46; if (/ET|PEN/.test(g.period || '')) return 91; return 0; };
+  const gapOK = g => g.h != null && (S.exact ? diffOf(g) === S.thr : diffOf(g) >= S.thr);
+  const minOK = g => !S.minFrom || minuteOf(g) >= S.minFrom;
+  const qual = g => isPlay(g) && gapOK(g) && minOK(g);
+  const waiting = g => isPlay(g) && gapOK(g) && !minOK(g);
+  const warmQ = g => isPlay(g) && g.h !== g.a && !qual(g);
+  const condHTML = () => `בפער <b dir="ltr">${S.thr}${S.exact ? '' : '+'}</b>${S.exact ? ' בדיוק' : ''}${S.minFrom ? ` · מדקה ${S.minFrom}` : ''}`;
+  const condText = () => `פער ${S.thr}${S.exact ? ' בדיוק' : ' ומעלה'}${S.minFrom ? `, מדקה ${S.minFrom}` : ''}`;
   const nm = (g, side) => side === 'h' ? (g.homeAlias || g.home || g.homeName || '?') : (g.awayAlias || g.away || g.awayName || '?');
   const minuteTxt = g => {
     const p = g.period, e = String(g.elapsed == null ? '' : g.elapsed).trim();
@@ -320,10 +353,34 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
   }
   const leagueChips = (g, withName) => {
     const m = leagueMeta(g.league);
-    return `${m.flag ? `<span class="flag">${m.flag}</span>` : ''}${withName ? `<span class="lg">${esc(leagueTxt(g))}</span>` : ''}<span class="badge ${m.cls}">${esc(m.badge)}</span>${m.w ? '<span class="badge w">נשים</span>' : ''}`;
+    return `${leagueLogo(g)}${m.flag ? `<span class="flag">${m.flag}</span>` : ''}${withName ? `<span class="lg">${esc(leagueTxt(g))}</span>` : ''}<span class="badge ${m.cls}">${esc(m.badge)}</span>${m.w ? '<span class="badge w">נשים</span>' : ''}`;
   };
   const leagueLine = g => { const m = leagueMeta(g.league); return `${m.flag ? m.flag + ' ' : ''}${leagueTxt(g)} · ${m.badge}${m.w ? ' · נשים' : ''}`; };
 
+
+  /* ---------- team + league logos ---------- */
+  const fixUrl = u => u ? String(u).replace(/ /g, '%20') : '';
+  const safeColor = c => /^#[0-9a-f]{3,8}$/i.test(String(c || '')) ? c : '#98a2b3';
+  const normName = x => String(x || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\b(fc|cf|sc|ac|afc|cd|ca|club|de|sk|fk|bk|if|the|1\d{3})\b/g, '').replace(/[^a-z0-9]/g, '');
+  function pickTeam(teams, names) {
+    const ns = names.filter(Boolean).map(normName).filter(Boolean);
+    let best = null, score = 0;
+    for (const t of teams) for (const a of ns) for (const b of [t.name, t.alias, t.abbreviation].map(normName).filter(Boolean)) {
+      const sc = a === b ? 3 : (a.length > 3 && b.length > 3 && (a.includes(b) || b.includes(a))) ? 2 : 0;
+      if (sc > score) { score = sc; best = t; }
+    }
+    return best;
+  }
+  function teamLogo(g, side, size) {
+    const logo = side === 'h' ? g.homeLogo : g.awayLogo;
+    const abbr = (side === 'h' ? g.homeAbbr : g.awayAbbr) || nm(g, side);
+    const ini = esc(String(abbr).replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase() || '•');
+    const col = safeColor(side === 'h' ? g.homeColor : g.awayColor);
+    return `<span class="tl" style="width:${size}px;height:${size}px"><i class="ini" style="background:${col};font-size:${Math.round(size * 0.36)}px">${ini}</i>` +
+      (logo ? `<img src="${esc(logo)}" alt="" loading="lazy" decoding="async" onload="var p=this.previousElementSibling;if(p)p.remove()" onerror="this.remove()">` : '') + '</span>';
+  }
+  const leagueLogo = g => { const u = S.leagueImg[g.league]; return u ? `<img class="ll" src="${esc(fixUrl(u))}" alt="" loading="lazy" decoding="async" onerror="this.remove()">` : ''; };
 
   function leaderMarket(g) {
     if (!g.mkts || !g.mkts.length || g.h == null || g.h === g.a) return null;
@@ -443,33 +500,36 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     ensureMeta(g, true);
     scheduleRender();
   }
-  function evaluate(g, prevDiff, src) {
+  // alert when a game is seen moving into the condition (a goal, or the clock reaching the chosen minute)
+  function evaluate(g, src) {
     if (!qual(g)) {
-      if (g.h == null || diffOf(g) < S.thr) {
+      if (!gapOK(g)) {
         g.alerted = false; g.known = false; g.alertAt = null; g.alertC = null;
         // only a live (WebSocket) score may cancel an earlier alert — the REST snapshot can lag
         if (src === 'ws' && S.alertedIds[g.id]) { delete S.alertedIds[g.id]; persist(); }
       }
+      if (g.h != null) g.qState = false;
       return;
     }
-    if (g.alerted || g.known) return;
-    if (S.alertedIds[g.id]) { g.alerted = true; g.alertAt = S.alertedIds[g.id]; return; }
+    if (g.alerted || g.known) { g.qState = true; return; }
+    if (S.alertedIds[g.id]) { g.alerted = true; g.alertAt = S.alertedIds[g.id]; g.qState = true; return; }
     const warm = Date.now() - S.startedAt < WARMUP;
-    const sawLower = prevDiff != null && prevDiff < S.thr;
-    if (sawLower || !warm) fireAlert(g); else g.known = true;
+    if (g.qState === false || !warm) fireAlert(g); else g.known = true;
+    g.qState = true;
   }
-  function setThr(v) {
-    v = Math.max(1, Math.min(5, v));
-    if (v === S.thr) return;
-    S.thr = v;
+  // after a settings change: games that already match show up quietly; new matches from now on alert
+  function applySettings() {
     for (const g of S.games.values()) {
-      if (qual(g)) { if (!g.alerted) g.known = true; }
-      else { g.alerted = false; g.known = false; g.alertAt = null; delete S.alertedIds[g.id]; }
+      if (qual(g)) { if (!g.alerted) g.known = true; g.qState = true; }
+      else { g.alerted = false; g.known = false; g.alertAt = null; delete S.alertedIds[g.id]; if (g.h != null) g.qState = false; }
     }
     persist();
-    toast(`🎯 עכשיו מתריע מפער של ${v} שערים ומעלה`);
+    toast(`🎯 מתריע על ${condText()}`);
     render();
   }
+  function setThr(v) { v = Math.max(1, Math.min(5, v)); if (v === S.thr) return; S.thr = v; applySettings(); }
+  function setExact(on) { if (!!on === S.exact) return; S.exact = !!on; applySettings(); }
+  function setMin(m) { m = +m || 0; if (m === S.minFrom) return; S.minFrom = m; applySettings(); }
   function toast(msg) {
     const t = $('toast'); if (!t) return;
     t.textContent = msg; t.classList.add('show');
@@ -492,11 +552,11 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     if (hn) { g.homeName = hn; g.awayName = an; }
     if (!g.home) g.home = hn;
     if (!g.away) g.away = an;
-    for (const t of (e.teams || [])) {
-      if (!t || !t.name) continue;
-      if (t.name === g.home || t.name === hn) g.homeAlias = t.alias || null;
-      if (t.name === g.away || t.name === an) g.awayAlias = t.alias || null;
-    }
+    const teams = (e.teams || []).filter(t => t && t.name);
+    const th = pickTeam(teams, [g.home, hn]);
+    const ta = pickTeam(teams.filter(t => t !== th), [g.away, an]);
+    if (th) { g.homeAlias = th.alias || null; g.homeLogo = fixUrl(th.logo); g.homeColor = th.color; g.homeAbbr = th.abbreviation; }
+    if (ta) { g.awayAlias = ta.alias || null; g.awayLogo = fixUrl(ta.logo); g.awayColor = ta.color; g.awayAbbr = ta.abbreviation; }
     const mk = (e.markets || []).filter(m => !m.sportsMarketType || /moneyline/i.test(m.sportsMarketType));
     const prev = {};
     for (const m of (g.mkts || [])) if (m.tok) prev[m.tok] = m;
@@ -552,6 +612,7 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
         const code = String(s.sport || '').toLowerCase();
         if (!code) continue;
         S.leagueName[code] = s.name;
+        if (s.image) S.leagueImg[code] = s.image;
         if (String(s.tags || '').split(',').includes('100350')) set.add(code);
       }
       if (set.size) S.soccer = set;
@@ -580,7 +641,7 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
         if (isNew || !g.wsAt || g.wsAt < S.snapStart) {
           const prev = g.h != null ? diffOf(g) : null;
           g.h = +sc[1]; g.a = +sc[2]; g.period = e.period; g.elapsed = e.elapsed; g.live = e.live; g.ended = e.ended; g.lastSeen = now;
-          evaluate(g, prev, 'snap');
+          evaluate(g, 'snap');
         }
       }
       S.snapState = 'ok'; S.lastSnap = now; S.snapCount = all.length;
@@ -603,8 +664,8 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     if (m.slug && MAIN_RE.test(m.slug)) g.slug = m.slug;
     if (sc) { g.h = +sc[1]; g.a = +sc[2]; }
     g.league = lg; g.lastSeen = g.wsAt = Date.now();
-    evaluate(g, prev, 'ws');
-    if (g.h !== g.a && isPlay(g)) ensureMeta(g); // a team leads → get its market so prices stream before the next goal
+    evaluate(g, 'ws');
+    if (isPlay(g)) ensureMeta(g); // team logos + market tokens (light, once per game)
     scheduleRender();
   }
   S.onGame = onGame;
@@ -785,7 +846,7 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
       pbox = `<div class="pbox"><div class="plabel">מחיר קנייה לניצחון של <b>${esc(L.leaderName)}</b></div><div class="sk sk-l" style="margin-top:8px;width:60%"></div></div>`;
     }
     const when = g.alertAt ? `<span class="ago" data-t="${g.alertAt}">🔔 ${ago(g.alertAt)}</span>` : '<span>היה בפער מההתחלה</span>';
-    const tr = (side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="nm">${esc(nm(g, side))}</span><span class="gl">${goals}</span></div>`;
+    const tr = (side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="tn">${teamLogo(g, side, 24)}<span class="nm">${esc(nm(g, side))}</span></span><span class="gl">${goals}</span></div>`;
     return `<a class="card${isNew ? ' new' : ''}" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener">` +
       `<div class="meta"><span class="lgw">${leagueChips(g, false)}</span><span class="min">${esc(minuteTxt(g))}</span></div><div class="lgn">${esc(leagueTxt(g))}</div>` +
       `<div class="prog"><i style="width:${progress(g).toFixed(0)}%"></i></div>` +
@@ -793,17 +854,17 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
       `${pbox}<div class="foot">${when}<span class="go">פתח בפולימרקט ↗</span></div></a>`;
   }
   const cardKey = g => [g.h, g.a, minuteTxt(g), progress(g).toFixed(0), g.alertAt || 0, (g.flashUntil && Date.now() < g.flashUntil) ? 1 : 0,
-    nm(g, 'h'), nm(g, 'a'), leagueTxt(g), leaderInfo(g).cents != null ? 1 : 0, g.slug || ''].join('|');
+    nm(g, 'h'), nm(g, 'a'), leagueTxt(g), leaderInfo(g).cents != null ? 1 : 0, g.slug || '', g.homeLogo || '', g.awayLogo || '', S.leagueImg[g.league] ? 1 : 0].join('|');
   function rowHTML(g) {
     const leadHome = g.h > g.a, lead = g.h !== g.a;
     const cls = side => (lead && (side === 'h') === leadHome) ? 'ld' : '';
     const L = lead ? leaderInfo(g) : { cents: null };
     if (L.cents != null) g.shownC = L.cents;
     return `<a class="row" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener"><span class="min">${esc(shortMin(g))}</span>` +
-      `<span class="teams"><span class="${cls('h')}">${esc(nm(g, 'h'))}</span><b>${g.h}–${g.a}</b><span class="${cls('a')}">${esc(nm(g, 'a'))}</span></span>` +
-      `<span class="pc" title="מחיר קנייה לניצחון של המובילה">${L.cents != null ? fmtC(L.cents) + '¢' : ''}</span><span class="lgc">${leagueChips(g, true)}</span></a>`;
+      `<span class="teams">${teamLogo(g, 'h', 18)}<span class="tnm ${cls('h')}">${esc(nm(g, 'h'))}</span><b>${g.h}–${g.a}</b><span class="tnm ${cls('a')}">${esc(nm(g, 'a'))}</span>${teamLogo(g, 'a', 18)}</span>` +
+      `<span class="pc" title="מחיר קנייה לניצחון של המובילה">${L.cents != null ? fmtC(L.cents) + '¢' : ''}</span><span class="lgc">${waiting(g) ? `<span class="badge wt">⏳ דקה ${S.minFrom}</span>` : ''}${leagueChips(g, true)}</span></a>`;
   }
-  const rowKey = g => [g.h, g.a, shortMin(g), nm(g, 'h'), nm(g, 'a'), leagueTxt(g), (g.h !== g.a && leaderInfo(g).cents != null) ? 1 : 0, g.slug || ''].join('|');
+  const rowKey = g => [waiting(g) ? 'w' + S.minFrom : '', g.h, g.a, shortMin(g), nm(g, 'h'), nm(g, 'a'), leagueTxt(g), (g.h !== g.a && leaderInfo(g).cents != null) ? 1 : 0, g.slug || '', g.homeLogo || '', g.awayLogo || '', S.leagueImg[g.league] ? 1 : 0].join('|');
   // update a list in place: only changed items are rebuilt, so live prices and animations keep running smoothly
   function patch(box, items, keyOf, htmlOf, emptyHTML) {
     if (!items.length) { if (box.dataset.empty !== emptyHTML) { box.innerHTML = emptyHTML; box.dataset.empty = emptyHTML; } return; }
@@ -850,18 +911,20 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     const play = [...S.games.values()].filter(isPlay);
     const byMin = (x, y) => (parseInt(y.elapsed, 10) || (y.period === 'HT' ? 45 : 0)) - (parseInt(x.elapsed, 10) || (x.period === 'HT' ? 45 : 0));
     const hot = play.filter(qual).sort((x, y) => (y.alertAt || 0) - (x.alertAt || 0) || diffOf(y) - diffOf(x) || byMin(x, y));
-    const warm = play.filter(warmQ).sort((x, y) => diffOf(y) - diffOf(x) || byMin(x, y));
+    const warm = play.filter(warmQ).sort((x, y) => (waiting(y) - waiting(x)) || diffOf(y) - diffOf(x) || byMin(x, y));
     const cold = play.filter(g => g.h === g.a).sort(byMin);
     $('kHot').textContent = hot.length;
     $('kWarm').textContent = warm.length;
     $('kLive').textContent = play.length;
     $('thr').textContent = S.thr;
-    document.querySelectorAll('.thrPlus').forEach(el => { el.textContent = S.thr + '+'; });
-    $('warmHint').textContent = `קבוצה מובילה, אבל עוד לא בפער של ${S.thr}`;
-    $('warmH').hidden = $('warm').hidden = S.thr === 1;
+    document.querySelectorAll('.cond').forEach(el => { el.innerHTML = condHTML(); });
+    $('warmHint').textContent = S.minFrom ? `קבוצה מובילה, אבל עוד לא עומד בתנאי (פער או דקה)` : `קבוצה מובילה, אבל עוד לא עומד בתנאי`;
+    $('exOff').className = S.exact ? '' : 'on'; $('exOn').className = S.exact ? 'on' : '';
+    $('minSel').value = String(S.minFrom);
+    $('summary').textContent = `מתריע על ${condText()}`;
     const loading = S.snapState !== 'ok' && S.snapState !== 'err' && Date.now() - S.startedAt < WARMUP;
     const sk = '<div class="card sk-card"><div class="sk sk-l" style="width:45%"></div><div class="sk sk-b"></div><div class="sk sk-b"></div><div class="sk sk-p"></div></div>';
-    patch($('hot'), hot, cardKey, cardHTML, loading ? sk + sk : `<div class="empty listen"><div class="radar">⚽</div><div><b>הבוט מקשיב לכל המשחקים החיים</b><br>ברגע שקבוצה תוביל ב-${S.thr} שערים — תשמע צפצוף ותקבל הודעה.</div></div>`);
+    patch($('hot'), hot, cardKey, cardHTML, loading ? sk + sk : `<div class="empty listen"><div class="radar">⚽</div><div><b>הבוט מקשיב לכל המשחקים החיים</b><br>ברגע שמשחק יגיע ל${esc(condText())} — תשמע צפצוף ותקבל הודעה.</div></div>`);
     patch($('warm'), warm, rowKey, rowHTML, `<div class="empty">${loading ? 'טוען משחקים…' : 'אין כרגע משחק עם יתרון'}</div>`);
     const cb = $('coldBtn'), cbox = $('cold');
     cb.hidden = !cold.length;
@@ -881,6 +944,9 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
   /* ---------- wiring ---------- */
   $('minus').onclick = () => setThr(S.thr - 1);
   $('plus').onclick = () => setThr(S.thr + 1);
+  $('exOff').onclick = () => setExact(false);
+  $('exOn').onclick = () => setExact(true);
+  $('minSel').onchange = e => setMin(e.target.value);
   $('cta').onclick = () => enableAll();
   $('snd').onclick = async () => {
     if (!S.soundOn || !audioOk()) return enableAll();
