@@ -266,7 +266,8 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
   const minOK = g => !S.minFrom || minuteOf(g) >= S.minFrom;
   const qual = g => isPlay(g) && gapOK(g) && minOK(g);
   const waiting = g => isPlay(g) && gapOK(g) && !minOK(g);
-  const warmQ = g => isPlay(g) && g.h !== g.a && !qual(g);
+  // 'close' = a team leads but the game doesn't match yet (in exact mode, a bigger gap is not 'close')
+  const warmQ = g => isPlay(g) && g.h !== g.a && !qual(g) && !(S.exact && diffOf(g) > S.thr);
   const condHTML = () => `בפער <b dir="ltr">${S.thr}${S.exact ? '' : '+'}</b>${S.exact ? ' בדיוק' : ''}${S.minFrom ? ` · מדקה ${S.minFrom}` : ''}`;
   const condText = () => `פער ${S.thr}${S.exact ? ' בדיוק' : ' ומעלה'}${S.minFrom ? `, מדקה ${S.minFrom}` : ''}`;
   const nm = (g, side) => side === 'h' ? (g.homeAlias || g.home || g.homeName || '?') : (g.awayAlias || g.away || g.awayName || '?');
@@ -912,7 +913,8 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     const byMin = (x, y) => (parseInt(y.elapsed, 10) || (y.period === 'HT' ? 45 : 0)) - (parseInt(x.elapsed, 10) || (x.period === 'HT' ? 45 : 0));
     const hot = play.filter(qual).sort((x, y) => (y.alertAt || 0) - (x.alertAt || 0) || diffOf(y) - diffOf(x) || byMin(x, y));
     const warm = play.filter(warmQ).sort((x, y) => (waiting(y) - waiting(x)) || diffOf(y) - diffOf(x) || byMin(x, y));
-    const cold = play.filter(g => g.h === g.a).sort(byMin);
+    const cold = play.filter(g => !qual(g) && !warmQ(g)).sort(byMin);
+    const allTied = cold.every(g => g.h === g.a);
     $('kHot').textContent = hot.length;
     $('kWarm').textContent = warm.length;
     $('kLive').textContent = play.length;
@@ -928,7 +930,7 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     patch($('warm'), warm, rowKey, rowHTML, `<div class="empty">${loading ? 'טוען משחקים…' : 'אין כרגע משחק עם יתרון'}</div>`);
     const cb = $('coldBtn'), cbox = $('cold');
     cb.hidden = !cold.length;
-    cb.textContent = S.showCold ? '▴ הסתר משחקים בשוויון' : `עוד ${cold.length} משחקים בשוויון ▾`;
+    cb.textContent = S.showCold ? (allTied ? '▴ הסתר משחקים בשוויון' : '▴ הסתר שאר המשחקים') : (allTied ? `עוד ${cold.length} משחקים בשוויון ▾` : `עוד ${cold.length} משחקים (שוויון או מעל הפער) ▾`);
     cbox.hidden = !S.showCold || !cold.length;
     if (!cbox.hidden) patch(cbox, cold, rowKey, rowHTML, '');
     const lb = $('logBtn'), lbox = $('log');
