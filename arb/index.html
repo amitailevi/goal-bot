@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="light">
+<title>🧮 ArbScanner</title>
+</head>
+<body>
+<script>
+/* 🧮 ArbScanner — Polymarket live soccer: leader + draw cost scanner (v1) */
+(async () => {
+  const GAMMA = 'https://gamma-api.polymarket.com';
+  const CLOB = 'https://clob.polymarket.com';
+  const WS_URL = 'wss://sports-api.polymarket.com/ws';
+  const MKT_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+  const MAIN_RE = /^[a-z0-9]+-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$/;
+  const BASE_TITLE = '🧮 ArbScanner';
+  const WARMUP = 90e3;
+  const PLAY = new Set(['1H', 'HT', '2H', 'ET', 'ET1', 'ET2', '1ET', '2ET', 'BT', 'ETHT', 'PEN']);
+  const MIN_NET = 0.5;           // ¢ per share after fees — below this the deal is skipped
+  const COOLDOWN = 10 * 60e3;    // at most one alert per game every 10 minutes
+  const GRACE = 30e3;            // a closed opportunity stays on screen for 30 seconds
+  const BOOK_FRESH = 30e3;
+  const DEF_FEE = { rate: 0.05, exp: 1 }; // Polymarket sports taker fee: C × 0.05 × p × (1 − p)
+
+  const OLD = window.__arb;
+  if (OLD && OLD.stop) { try { OLD.stop(); } catch (e) {} }
+  const SS_KEY = 'arb';
+  const saved = (() => { try { return JSON.parse(sessionStorage.getItem(SS_KEY) || 'null') || {}; } catch (e) { return {}; } })();
+  const prefs = (() => { try { return JSON.parse(localStorage.getItem('arbprefs') || 'null') || {}; } catch (e) { return {}; } })();
+  const fresh = t => Date.now() - t < 6 * 3600e3;
+
+  const S = window.__arb = {
+    gap: +prefs.gap || 2, minFrom: prefs.minFrom != null ? +prefs.minFrom : 60, maxCost: +prefs.maxCost || 96, budget: +prefs.budget || 100,
+    muted: !!prefs.muted, demo: false,
+    games: new Map(), soccer: null, leagueName: {}, leagueImg: {},
+    alerts: (saved.alerts || []).filter(a => a && fresh(a.t)), alertedIds: saved.alertedIds || {},
+    ws: null, wsState: 'connecting', lastMsg: 0, backoff: 1000, closedAt: 0,
+    mws: null, mwsState: 'idle', mBackoff: 1000, mInit: false, mLastAny: 0,
+    subs: new Set(), books: new Map(), tokGame: new Map(), pend: new Set(), dirty: new Set(), rafPending: false,
+    startedAt: Date.now(), audio: (OLD && OLD.audio) || null, soundOn: !!(OLD && OLD.soundOn), unseen: 0, flashTimer: null,
+    timers: [], stopped: false, snapState: 'idle', lastSnap: 0, renderPending: false, trapArmed: false, showLog: false,
+  };
+  for (const k of Object.keys(S.alertedIds)) if (!fresh(S.alertedIds[k])) delete S.alertedIds[k];
+  S.stop = () => {
+    S.stopped = true;
+    S.timers.forEach(clearInterval);
+    if (S.flashTimer) clearInterval(S.flashTimer);
+    if (S.mPing) clearInterval(S.mPing);
+    if (S.onPop) window.removeEventListener('popstate', S.onPop);
+    try { S.ws && S.ws.close(); } catch (e) {}
+    try { S.mws && S.mws.close(); } catch (e) {}
+  };
+  const persist = () => {
+    try { sessionStorage.setItem(SS_KEY, JSON.stringify({ alerts: S.alerts.slice(0, 50), alertedIds: S.alertedIds })); } catch (e) {}
+    try { localStorage.setItem('arbprefs', JSON.stringify({ gap: S.gap, minFrom: S.minFrom, maxCost: S.maxCost, budget: S.budget, muted: S.muted })); } catch (e) {}
+  };
+
+  /* ---------- page ---------- */
+  const CSS = `
+:root{--bg:#fff;--card:#fff;--ink:#101828;--mut:#667085;--line:#eaecf0;--soft:#f8f9fb;--blue:#1652f0;--green:#079455;--greenbg:#ecfdf3;--greenln:#abefc6;--red:#d92d20;--redbg:#fef3f2;--amber:#f79009;--amberbg:#fffaeb;--shadow:0 1px 2px rgba(16,24,40,.05)}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;background:#fff;color:var(--ink);font-family:Heebo,Assistant,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;-webkit-font-smoothing:antialiased;color-scheme:light}
+a{color:inherit;text-decoration:none}
+a:focus-visible,button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.n,.gl,.pv,.pc,.min,.wv,.lv,.wp{font-variant-numeric:tabular-nums}
+.wrap{max-width:1040px;margin:0 auto;padding:28px 20px 48px}
+.top{padding-bottom:22px;border-bottom:1px solid var(--line)}
+.toprow{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.brand{display:flex;align-items:center;gap:8px;min-width:0}
+.bname{font-weight:800;font-size:16px;white-space:nowrap}
+.btag{color:var(--mut);font-size:14px;white-space:nowrap}
+.logo{width:36px;height:36px;border-radius:11px;background:var(--soft);border:1px solid var(--line);display:grid;place-items:center;font-size:20px;flex:none;margin-inline-end:2px}
+h1{margin:20px 0 0;font-size:32px;font-weight:800;letter-spacing:-.6px;line-height:1.25}
+h1 .nw{white-space:nowrap}
+.sub{margin:8px 0 0;color:var(--mut);font-size:15px;line-height:1.65;max-width:680px}
+.sub b{color:var(--ink);font-weight:600;white-space:nowrap}
+.nav{margin:12px 0 0;font-size:14px}
+.nav a{color:var(--blue);font-weight:600}
+.tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stepper{display:flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 12px;font-size:14px;color:var(--mut)}
+.stepper button{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:17px;cursor:pointer;line-height:1}
+.stepper button:hover{background:var(--soft)}
+.stepper b{min-width:18px;text-align:center;color:var(--ink);font-size:16px}
+.icon{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:#fff;font-size:17px;cursor:pointer}
+.icon:hover{background:var(--soft)}
+.livepill{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 14px;font-size:14px;font-weight:600;white-space:nowrap}
+.livepill .dot{background:var(--amber)}
+.livepill.ok .dot{background:#12b76a;animation:ping 1.8s infinite}
+.livepill.bad .dot{background:var(--red)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#d0d5dd;flex:none}
+.dot.on{background:#12b76a;animation:ping 1.8s infinite}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgba(18,183,106,.45)}70%{box-shadow:0 0 0 6px rgba(18,183,106,0)}100%{box-shadow:0 0 0 0 rgba(18,183,106,0)}}
+.cta{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;margin:18px 0 0;border:0;border-radius:14px;padding:13px 18px;font:inherit;font-size:16px;font-weight:700;cursor:pointer;background:var(--amber);color:#fff}
+.cta:hover{filter:brightness(1.05)}
+.cta.soft{background:#fff;color:var(--blue);border:1px solid var(--line);font-weight:600}
+.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px;padding:10px 12px;background:var(--soft);border:1px solid var(--line);border-radius:14px}
+.controls .lbl{font-size:14px;color:var(--mut);font-weight:700}
+.seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:999px;padding:3px}
+.seg button{border:0;background:transparent;padding:6px 12px;border-radius:999px;font:inherit;font-size:14px;cursor:pointer;color:var(--mut)}
+.seg button.on{background:var(--ink);color:#fff;font-weight:700}
+.selw{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:3px 6px 3px 12px;font-size:14px;color:var(--mut)}
+.selw select{border:0;background:transparent;font:inherit;font-size:15px;font-weight:700;color:var(--ink);cursor:pointer;outline:none;padding:3px 2px}
+.summary{margin-inline-start:auto;font-size:13px;color:var(--mut)}
+.badge.wt{background:var(--amberbg);color:#b54708}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:20px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;text-align:center}
+.kpi .n{font-size:30px;font-weight:800;line-height:1.1}
+.kpi .l{color:var(--mut);font-size:14px;margin-top:2px}
+.kpi.hot{border-color:var(--greenln)}
+.kpi.hot .n{color:var(--green)}
+.sec{font-size:17px;font-weight:800;margin:30px 0 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sec .hint{font-size:13px;font-weight:500;color:var(--mut)}
+.sdot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-inline-end:8px;vertical-align:middle}
+.sdot.g{background:var(--green)}.sdot.a{background:var(--amber)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.card{display:block;background:#fff;border:1px solid var(--line);border-top:3px solid var(--green);border-radius:16px;padding:14px 16px;box-shadow:var(--shadow);transition:box-shadow .15s,transform .15s}
+.card:hover{box-shadow:0 6px 20px rgba(16,24,40,.08);transform:translateY(-1px)}
+.card.new{border-color:var(--amber);box-shadow:0 0 0 4px rgba(247,144,9,.14)}
+.meta{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
+.lgw{display:flex;align-items:center;gap:6px;min-width:0}
+.lgw .lg{color:var(--mut);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lgn{font-size:12px;color:var(--mut);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.flag{font-size:17px;line-height:1;flex:none}
+.ll{width:18px;height:18px;object-fit:contain;flex:none}
+.card .ll{width:22px;height:22px}
+.tn{display:flex;align-items:center;gap:8px;min-width:0}
+.tl{position:relative;display:inline-block;flex:none;border-radius:6px;overflow:hidden}
+.tl .ini{position:absolute;inset:0;display:grid;place-items:center;color:#fff;font-style:normal;font-weight:800;letter-spacing:-.3px}
+.tl img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.badge{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:2px 7px;white-space:nowrap;flex:none}
+.card .badge{font-size:13px;padding:3px 9px}
+.badge.t1{background:#ecfdf3;color:#067647}
+.badge.t2{background:#f2f4f7;color:#344054}
+.badge.t3{background:#fff;color:#667085;border:1px solid var(--line)}
+.badge.cl{background:#fef7c3;color:#854a0e}
+.badge.eu{background:#eef4ff;color:#3538cd}
+.badge.cup{background:#eff8ff;color:#175cd3}
+.badge.nat{background:#f4f3ff;color:#5925dc}
+.badge.w{background:#fdf2fa;color:#c11574}
+.min{background:var(--redbg);color:var(--red);border-radius:8px;padding:2px 8px;font-weight:700;font-size:13px;white-space:nowrap;text-align:center;flex:none}
+.prog{height:3px;background:var(--soft);border-radius:3px;margin:10px 0 2px;overflow:hidden}
+.prog i{display:block;height:100%;background:#98a2b3;border-radius:3px}
+.board{direction:ltr;margin:10px 0 8px;display:flex;flex-direction:column;gap:6px}
+.tr{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--soft);border-radius:10px;padding:7px 12px}
+.tr .nm{font-size:16px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr .gl{font-size:22px;font-weight:800;min-width:22px;text-align:right}
+.tr.lead{background:var(--greenbg)}
+.tr.lead .nm,.tr.lead .gl{color:var(--green);font-weight:800}
+.pbox{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:8px}
+.plabel{font-size:13px;color:var(--mut)}
+.plabel b{color:var(--ink)}
+.prow{display:flex;align-items:center;gap:8px;margin-top:2px}
+.pv{font-size:28px;font-weight:800;line-height:1.2;padding:0 6px;border-radius:8px;direction:ltr;unicode-bidi:isolate}
+.pd{font-size:12px;font-weight:700;color:var(--mut)}
+.pd.up{color:var(--green)}
+.pd.dn{color:var(--red)}
+.ret{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;font-size:13px;border-radius:8px}
+.ret>span{border-radius:8px;padding:4px 9px;background:var(--soft);color:var(--mut)}
+.ret .win b,.ret .win .wp{color:var(--green)}
+.ret .lose b{color:var(--red)}
+.ret b,.ret .wp{direction:ltr;unicode-bidi:isolate}
+.tick-up{animation:tup 1s ease-out}
+.tick-dn{animation:tdn 1s ease-out}
+@keyframes tup{0%{background:rgba(18,183,106,.28)}100%{background:transparent}}
+@keyframes tdn{0%{background:rgba(240,68,56,.24)}100%{background:transparent}}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:13px;color:var(--mut);gap:8px}
+.go{background:var(--blue);color:#fff;border-radius:10px;padding:8px 14px;font-weight:700;font-size:14px;white-space:nowrap}
+.card:hover .go{filter:brightness(1.08)}
+.empty{grid-column:1/-1;background:#fff;border:1px dashed var(--line);border-radius:16px;padding:18px;color:var(--mut);font-size:15px;text-align:center}
+.listen{display:flex;align-items:center;gap:16px;text-align:right;justify-content:center}
+.listen b{color:var(--ink)}
+.radar{position:relative;width:50px;height:50px;border-radius:50%;background:var(--greenbg);display:grid;place-items:center;font-size:22px;flex:none}
+.radar:after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid var(--green);animation:radar 2.2s ease-out infinite}
+@keyframes radar{0%{transform:scale(1);opacity:.7}100%{transform:scale(1.6);opacity:0}}
+.sk{background:linear-gradient(90deg,var(--soft),#eef0f3,var(--soft));background-size:200% 100%;animation:sh 1.3s infinite;border-radius:8px}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.sk-card{border-top-color:var(--line);min-height:210px;display:flex;flex-direction:column;gap:10px}
+.sk-l{height:14px}.sk-b{height:36px}.sk-p{height:52px}
+.list{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.list .empty{border:0;border-radius:0}
+.row{display:grid;grid-template-columns:62px 1fr 64px 230px;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--line);font-size:15px}
+.row:first-child{border-top:0}
+.row:hover{background:var(--soft)}
+.row .teams{direction:ltr;display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;white-space:nowrap}
+.row .teams .tnm{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.row .teams b{margin:0 6px;flex:none}
+.ld{font-weight:800}
+.lgc{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-width:0;direction:rtl}
+.lgc .lg{color:var(--mut);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pc{font-weight:700;font-size:14px;text-align:center;border-radius:8px;padding:3px 6px;background:var(--soft);direction:ltr;unicode-bidi:isolate}
+.pc:empty{background:none}
+.more{display:block;width:100%;margin:12px 0 0;padding:11px;border-radius:12px;border:1px solid var(--line);background:#fff;color:var(--mut);font:inherit;font-size:14px;cursor:pointer}
+.more:hover{background:var(--soft)}
+.log{margin-top:10px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:4px 16px}
+.log div{padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+.log div:first-child{border-top:0}
+.how{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:12px 16px;font-size:14px}
+.how summary{cursor:pointer;font-weight:700}
+.how ul{margin:10px 0 2px;padding-inline-start:20px;line-height:1.8;color:var(--mut)}
+footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-align:center}
+.alertbar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:20;width:min(780px,calc(100% - 24px))}
+.ab{display:flex;align-items:center;gap:12px;background:#fff;border:2px solid var(--amber);border-radius:16px;padding:12px 14px;box-shadow:0 16px 40px rgba(16,24,40,.16);animation:drop .3s ease-out}
+@keyframes drop{from{transform:translateY(-14px);opacity:0}to{transform:none;opacity:1}}
+.ab-ic{font-size:24px}
+.ab-tx{flex:1;font-size:15px;line-height:1.5}
+.ab-tx bdi{font-weight:700}
+.ab-sub{font-size:13px;color:var(--mut);margin-top:2px}
+.ab-p{direction:ltr;unicode-bidi:isolate}
+.ab-go{background:var(--blue);color:#fff;border-radius:10px;padding:8px 12px;font-weight:700;font-size:14px;white-space:nowrap}
+.ab-x{border:0;background:transparent;font-size:18px;cursor:pointer;color:var(--mut)}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#101828;color:#fff;padding:11px 18px;border-radius:12px;font-size:15px;opacity:0;transition:.25s;pointer-events:none;z-index:30}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.sub b{white-space:normal}
+.nav{margin:12px 0 0;font-size:14px}
+.nav a{color:var(--blue);font-weight:600}
+.clock{font-variant-numeric:tabular-nums;font-weight:700;font-size:14px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 12px;white-space:nowrap}
+.pillbtn{background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 12px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap;color:var(--ink)}
+.pillbtn:hover{background:var(--soft)}
+.pillbtn.on{background:#fef0c7;border-color:#fedf89;color:#b54708}
+.demobar{margin-top:14px;background:var(--amberbg);border:1px solid #fedf89;color:#b54708;border-radius:12px;padding:10px 14px;font-weight:600;font-size:14px;line-height:1.6}
+.stepper .u{color:var(--mut)}
+.calc{margin-top:2px}
+.legs{border:1px solid var(--line);border-radius:12px;margin-top:10px;overflow:hidden}
+.leg{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line);font-size:14px}
+.leg:first-child{border-top:0}
+.leg .lk{color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.leg .lk b{color:var(--ink)}
+.leg .lp{font-weight:800;font-size:17px;direction:ltr;unicode-bidi:isolate;border-radius:6px;padding:0 4px}
+.leg .ls{font-size:12px;color:var(--mut);text-align:left;white-space:nowrap}
+.leg .ls.bad{color:var(--red);font-weight:700}
+.leg.tot{background:var(--soft)}
+.leg.tot .lk{color:var(--ink);font-weight:700}
+.leg.tot .lp{font-size:21px}
+.leg.tot.ok{background:var(--greenbg)}
+.leg.tot.ok .lp{color:var(--green)}
+.money{display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:14px;line-height:1.5}
+.money>div{border-radius:10px;padding:8px 12px}
+.money .win{background:var(--greenbg);color:#067647}
+.money .win.off{background:var(--soft);color:var(--mut)}
+.money .risk{background:var(--redbg);color:#b42318}
+.money b{direction:ltr;unicode-bidi:isolate}
+.money .m{color:var(--mut);font-size:12px}
+.alt{margin-top:8px;font-size:13px;color:var(--mut);background:var(--soft);border-radius:10px;padding:7px 12px;line-height:1.5}
+.alt.best{color:#3538cd;background:#eef4ff}
+.alt b{direction:ltr;unicode-bidi:isolate}
+.alt .bad{color:var(--red);font-weight:700}
+.wait{margin-top:10px;font-size:14px;color:var(--mut);background:var(--soft);border-radius:10px;padding:10px 12px}
+.st{font-weight:700}
+.st.open{color:var(--green)}
+.card.closed{opacity:.62;border-top-color:#d0d5dd}
+.card.demo{border-top-color:var(--amber)}
+.badge.demo{background:#fef0c7;color:#b54708}
+.badge.ok{background:var(--greenbg);color:#067647}
+.badge.no{background:#fff;color:var(--mut);border:1px solid var(--line)}
+.badge.bad{background:var(--redbg);color:#b42318}
+.row{grid-template-columns:62px 1fr 70px 250px}
+@media (max-width:640px){.wrap{padding:16px 12px 36px}h1{font-size:24px;margin-top:16px}.btag{display:none}.sub{font-size:14px}.kpi .n{font-size:24px}
+.row{grid-template-columns:50px 1fr 60px auto}.lgc .lg{display:none}.lgc .ll,.lgc .flag{display:none}.ab{flex-wrap:wrap}.ab-tx{flex-basis:70%}
+.clock{display:none}.leg{padding:8px 10px}.lgc>.badge{display:none}}
+`;
+  const HTML = `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="color-scheme" content="light"><title>${BASE_TITLE}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='88'%3E%F0%9F%A7%AE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap"><style>${CSS}</style></head>
+<body><div class="wrap">
+<header class="top">
+  <div class="toprow">
+    <div class="brand"><div class="logo">🧮</div><span class="bname">ArbScanner</span><span class="btag">· סורק מובילה + תיקו</span></div>
+    <div class="tools">
+      <span id="clock" class="clock" dir="ltr" title="השעה עכשיו">--:--:--</span>
+      <button id="demoBtn" class="pillbtn" title="כרטיסים לדוגמה, בלי נתונים אמיתיים">🧪 דמו</button>
+      <button id="snd" class="icon" title="צליל">🔔</button>
+      <div id="live" class="livepill" title=""><span class="dot"></span><span id="liveTx">מתחבר…</span></div>
+    </div>
+  </div>
+  <h1 id="headline">מובילה + תיקו ב-96¢ או פחות? <span class="nw">תקבל התראה מיד.</span></h1>
+  <p class="sub" id="subTx"></p>
+  <p class="nav"><a href="../">⚽ לבוט 2 שערים ←</a></p>
+</header>
+<section class="controls" aria-label="הגדרות סריקה">
+  <span class="lbl">סורק:</span>
+  <div class="stepper" title="הפרש השערים (בדיוק)"><span>פער</span><button id="gMinus" aria-label="פחות">−</button><b id="gapV">2</b><button id="gPlus" aria-label="יותר">+</button><span class="u">בדיוק</span></div>
+  <label class="selw" title="רק משחקים מהדקה הזו והלאה"><span>מדקה</span><select id="minSel"><option value="0">כל המשחק</option><option value="45">45</option><option value="60">60</option><option value="65">65</option><option value="70">70</option><option value="75">75</option><option value="80">80</option><option value="85">85</option></select></label>
+  <div class="stepper" title="הסכום המקסימלי של מובילה + תיקו"><span>עלות עד</span><button id="cMinus" aria-label="פחות">−</button><b id="costV" dir="ltr">96¢</b><button id="cPlus" aria-label="יותר">+</button></div>
+  <label class="selw" title="כמה כסף נכנס לעסקה (משפיע על הרווח ועל בדיקת הנזילות)"><span>השקעה</span><select id="budSel"><option value="50">$50</option><option value="100">$100</option><option value="250">$250</option><option value="500">$500</option><option value="1000">$1,000</option></select></label>
+  <span class="summary" id="summary"></span>
+</section>
+<div id="demoBar" class="demobar" hidden>🧪 מצב דמו: 3 כרטיסים לדוגמה כדי לראות איך זה נראה. המספרים לא אמיתיים. לוחצים שוב על "דמו" כדי לחזור לנתונים חיים.</div>
+<button id="cta" class="cta" hidden></button>
+<section class="kpis">
+  <div class="kpi hot"><div class="n" id="kOpp">–</div><div class="l">הזדמנויות עכשיו</div></div>
+  <div class="kpi"><div class="n" id="kWatch">–</div><div class="l">במעקב</div></div>
+  <div class="kpi"><div class="n" id="kLive">–</div><div class="l">משחקים חיים</div></div>
+</section>
+<h2 class="sec"><span><i class="sdot g"></i>הזדמנויות</span><span class="hint" id="oppHint"></span></h2>
+<section id="opps" class="cards"></section>
+<h2 class="sec"><span><i class="sdot a"></i>במעקב</span><span class="hint" id="watchHint"></span></h2>
+<section id="watch" class="list"></section>
+<button id="logBtn" class="more" hidden></button>
+<section id="log" class="log" hidden></section>
+<details class="how"><summary>איך זה עובד?</summary><ul>
+<li>התוצאות והמחירים מגיעים בזמן אמת מפולימרקט (ספר הפקודות).</li>
+<li>הבוט בודק רק משחקים בפער שבחרת (בדיוק) ומהדקה שבחרת.</li>
+<li>לכל משחק: מחיר הקנייה הזול ביותר וכמה מניות יש בו — ל"המובילה מנצחת" ול"תיקו".</li>
+<li>סך עלות = מובילה + תיקו. אם המובילה מנצחת או שנגמר בתיקו, כל זוג מניות שווה $1.</li>
+<li>עמלת קנייה (Taker) בספורט: 0.05 × מחיר × (1 − מחיר) לכל מניה, בכל אחת מהקניות. הבוט קורא את שיעור העמלה מנתוני השוק.</li>
+<li>הזדמנות = סך עלות עד הסף שבחרת, מספיק מניות בשני הצדדים בשביל סכום ההשקעה, ורווח נקי של חצי סנט ומעלה למניה אחרי עמלות.</li>
+<li>אותו הימור אפשר לפעמים לקנות בקנייה אחת: "לא" על הקבוצה שבפיגור. אם זה זול יותר — הכרטיס מראה את זה.</li>
+<li><b>הסיכון:</b> אם הקבוצה שבפיגור מנצחת, שתי הקניות מפסידות והולך כל הסכום.</li>
+<li>הבוט רק מתריע — לא קונה ולא מוכר.</li></ul></details>
+<footer>נתונים: Polymarket · מחירים וכמויות מספר הפקודות בזמן אמת<br>כדי שיעבוד: להשאיר את הטאב פתוח ואת המחשב ער</footer>
+</div><div id="alertbar" class="alertbar" hidden></div><div id="toast" class="toast"></div></body>`;
+  document.documentElement.innerHTML = HTML;
+  document.documentElement.setAttribute('dir', 'rtl');
+  document.documentElement.setAttribute('lang', 'he');
+  document.title = BASE_TITLE;
+
+  /* ---------- helpers ---------- */
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const num = x => { const n = parseFloat(x); return isFinite(n) ? n : null; };
+  const isEnded = g => !!g.ended || /^(FT|AET|POST|END|FIN)/i.test(g.period || '') || ['Final', 'Awarded', 'Canceled', 'Postponed', 'Abandoned'].includes(g.status);
+  const isPlay = g => g.h != null && !isEnded(g) && g.period !== 'SUS' && g.status !== 'Suspended' &&
+    (PLAY.has(g.period) || ['InProgress', 'Break', 'PenaltyShootout'].includes(g.status));
+  const diffOf = g => Math.abs(g.h - g.a);
+  const minuteOf = g => { const e = parseInt(g.elapsed, 10); if (g.period === 'HT') return 45; if (isFinite(e)) return e; if (g.period === '2H') return 46; if (/ET|PEN/.test(g.period || '')) return 91; return 0; };
+  const gapOK = g => g.h != null && diffOf(g) === S.gap;
+  const minOK = g => !S.minFrom || minuteOf(g) >= S.minFrom;
+  const inScope = g => isPlay(g) && gapOK(g) && minOK(g);
+  const waiting = g => isPlay(g) && gapOK(g) && !minOK(g);
+  const nm = (g, side) => side === 'h' ? (g.homeAlias || g.home || g.homeName || '?') : (g.awayAlias || g.away || g.awayName || '?');
+  const leaderName = g => g.h > g.a ? nm(g, 'h') : nm(g, 'a');
+  const trailerName = g => g.h > g.a ? nm(g, 'a') : nm(g, 'h');
+  const minuteTxt = g => {
+    const p = g.period, e = String(g.elapsed == null ? '' : g.elapsed).trim();
+    if (p === 'HT') return 'מחצית';
+    if (p === 'PEN') return 'פנדלים';
+    if (p === 'BT' || p === 'ETHT') return 'הפסקה';
+    if (e) return `דקה ${e}'`;
+    if (p === '1H') return 'חצי ראשון';
+    if (p === '2H') return 'חצי שני';
+    if (/ET/.test(p || '')) return 'הארכה';
+    return p || '';
+  };
+  const shortMin = g => {
+    const p = g.period, e = String(g.elapsed == null ? '' : g.elapsed).trim();
+    if (p === 'HT') return 'מחצית';
+    if (p === 'PEN') return 'פנדלים';
+    return e ? `${e}'` : (p || '');
+  };
+  const leagueTxt = g => S.leagueName[g.league] || String(g.league || '').toUpperCase();
+  const hhmm = t => new Date(t).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+  const ago = t => { const s = Math.max(0, (Date.now() - t) / 1000); if (s < 45) return 'עכשיו'; const m = Math.round(s / 60); return m < 60 ? `לפני ${m} דק׳` : `לפני ${Math.round(m / 60)} שע׳`; };
+  const secsAgo = t => { const s = Math.max(1, Math.round((Date.now() - t) / 1000)); return s < 60 ? `לפני ${s} שנ׳` : ago(t); };
+  const link = g => g.slug ? `https://polymarket.com/sports/${g.league}/${g.slug}` : 'https://polymarket.com/sports/soccer/games';
+  const getJSON = async url => { const r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); };
+  // money / price formatting (prices are in dollars: 0.94 = 94¢)
+  const cents = v => Math.round(v * 1000) / 10;
+  const c1 = v => { const c = cents(v); return (Number.isInteger(c) ? String(c) : c.toFixed(1)) + '¢'; };
+  const c2 = v => (Math.round(v * 10000) / 100).toFixed(2) + '¢';
+  const usd = v => '$' + (Math.round(v * 100) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const usd0 = v => '$' + Number(v).toLocaleString('en-US');
+  const shares = v => Math.floor(v).toLocaleString('en-US');
+  const ltr = s => `<b dir="ltr">${s}</b>`;
+
+  /* ---------- league: country flag + level ---------- */
+  // code:COUNTRY:LEVEL — level 1-6 = division, c = cup, s = super cup, r = regional, CL/EL/ECL = continental club cups, CWC, X = club tournament, F = friendlies, N = national teams; w = women
+  const LG = {};
+  ('acl2:AS:EL acle:AS:CL afc:AS:N afcl:AS:CL afcq:AF:N afwq:AF:N arg:AR:1 argcopa:AR:c argpn:AR:2 asean:AS:N aseanc:AS:X aseanw:AS:Nw aswq:AS:N atc:AT:c auc:AU:c aus:AU:1 aut:AT:1 ' +
+   'aze1:AZ:1 aze2:AZ:2 azec:AZ:c bel1:BE:1 bel2:BE:2 bl2:DE:2 bl3:DE:3 blr1:BY:1 bol1:BO:1 bra:BR:1 bra2:BR:2 bra3:BR:3 brcm:BR:r brco:BR:c bul:BG:1 bun:DE:1 caf:AF:N cafcl:AF:CL ' +
+   'canch:CA:c canpl:CA:1 ccc:AM:CL ccup:AM:s cde:FR:c cdr:ES:c chfa:CN:c chi:CN:1 chi1:CL:1 chi2:CN:2 chl2:CL:2 clf:W:F cof:AM:N col:EU:ECL col1:CO:1 col2:CO:2 con:AM:N conl:AM:N ' +
+   'copaam:AM:N cwc:W:CWC cze1:CZ:1 den:DK:1 dfb:DE:c ecs:EN:s ecu1:EC:1 efa:EN:c efl:EN:c egy1:EG:1 el1:EN:3 el2:EN:4 elc:EN:2 enl:EN:5 epl:EN:1 ere:NL:1 es2:ES:2 es3:ES:3 est1:EE:1 ' +
+   'euc:EU:N ewq:EU:N fif:W:N fifaw:W:Nw fifwc:W:N fin1:FI:1 fl1:FR:1 fpd:CR:1 fr2:FR:2 fro1:FO:1 frtc:FR:s geo1:GE:1 grc:GR:c gre1:GR:1 gsc:DE:s gtm:GT:1 hr1:HR:1 hun:HU:1 icwq:W:N ' +
+   'idn1:ID:1 idn2:ID:2 ire:IE:1 irl1:IE:1 isc:IT:s isl1:IS:1 isp:IN:1 isr:IL:1 itc:IT:c itsb:IT:2 j1100:JP:1 j2100:JP:2 ja2:JP:2 ja3:JP:3 jap:JP:1 kaz1:KZ:1 kor:KR:1 kor2:KR:2 lal:ES:1 ' +
+   'lec:AM:X lib:AM:CL ltu1:LT:1 lva1:LV:1 mar1:MA:1 mex:MX:1 mex2:MX:2 mls:US:1 nawq:AM:N ncag:AM:N ned2:NL:2 nirl1:GB:1 nlc:NL:c nln:EN:6 nls:EN:6 nor:NO:1 nor2:NO:2 nwsl:US:1w ' +
+   'ofc:AS:N owq:AS:N par1:PY:1 per1:PE:1 pol:PL:1 por:PT:1 pt2:PT:2 ptc:PT:c ptsc:PT:s qat1:QA:1 rou1:RO:1 rus:RU:1 saf1:ZA:1 sawq:AM:N sclc:SC:c scoc:SC:c scop:SC:1 sea:IT:1 serc:IT:3 ' +
+   'skc:SA:c slo:SI:1 spl:SA:1 srb:RS:1 ssc:ES:s sud:AM:EL sui:CH:1 svk1:SK:1 swe:SE:1 swe2:SE:2 tha1:TH:1 tpe1:TW:1 tpew:TW:1w trsk:TR:s tur:TR:1 tur2:TR:2 u20wwc:W:Nw uae1:AE:1 ' +
+   'ucl:EU:CL uef:EU:N uel:EU:EL ueq:EU:N ukr1:UA:1 unl:EU:N uru1:UY:1 usc:EU:s usl1:US:3 uslc:US:2 usoc:US:c uwcl:EU:CLw uwec:EU:ELw uzb1:UZ:1 ven1:VE:1 weuc:EU:Nw weuq:EU:Nw ' +
+   'wsl:EN:1w wsl2:EN:2w wwcquefa:EU:Nw').split(' ').forEach(x => { const [c, cc, lv] = x.split(':'); LG[c] = { cc, lv: lv.replace(/w$/, ''), w: /w$/.test(lv) }; });
+  const CONT = { ucl: 'ליגת האלופות', uwcl: 'ליגת האלופות', lib: 'ליברטדורס', acle: 'אלופות אסיה', afcl: 'אלופות אסיה', cafcl: 'אלופות אפריקה', ccc: 'אלופות צפון אמריקה',
+    uel: 'הליגה האירופית', sud: 'סודאמריקנה', acl2: 'אלופות אסיה 2', uwec: 'גביע אירופה', col: 'הקונפרנס ליג' };
+  const TIER = ['', 'ליגה ראשונה', 'ליגה שנייה', 'ליגה שלישית', 'ליגה רביעית', 'ליגה חמישית', 'ליגה שישית'];
+  const flagOf = cc => {
+    if (!cc) return '';
+    if (cc === 'EN') return '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
+    if (cc === 'SC') return '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}';
+    if (cc === 'W' || cc === 'AF') return '🌍';
+    if (cc === 'AM') return '🌎';
+    if (cc === 'AS') return '🌏';
+    return String.fromCodePoint(...[...cc].map(ch => 0x1F1E6 + ch.charCodeAt(0) - 65));
+  };
+  function leagueMeta(code) {
+    code = String(code || '').toLowerCase();
+    let L = LG[code];
+    if (!L) {
+      const n = String(S.leagueName[code] || '').toLowerCase();
+      const lv = /champions/.test(n) ? 'CL' : /europa|conference|sudamericana/.test(n) ? 'EL' : /qualif|world cup|nations|copa am|gold cup|friendl|\beuro\b/.test(n) ? 'N'
+        : /cup|copa|pokal|coupe|coppa|taça|beker|kupa|trophy|trophée/.test(n) ? 'c' : /\b(2|ii)\b|segunda|serie b|ligue 2|championship|primera b|liga 2|first division|1\. lig/.test(n) ? '2' : '';
+      L = { cc: '', lv, w: /women|feminin|femenin|frauen/.test(n) };
+    }
+    const lv = L.lv;
+    let badge = 'ליגה', cls = 't3';
+    if (/^\d$/.test(lv)) { badge = TIER[+lv] || `ליגה ${lv}`; cls = lv === '1' ? 't1' : lv === '2' ? 't2' : 't3'; }
+    else if (lv === 'c') { badge = 'גביע'; cls = 'cup'; }
+    else if (lv === 's') { badge = 'סופרקאפ'; cls = 'cup'; }
+    else if (lv === 'r') { badge = 'ליגה מחוזית'; cls = 't3'; }
+    else if (lv === 'CL') { badge = '🏆 ' + (CONT[code] || 'ליגת האלופות'); cls = 'cl'; }
+    else if (lv === 'EL' || lv === 'ECL') { badge = CONT[code] || 'גביע יבשתי'; cls = 'eu'; }
+    else if (lv === 'CWC') { badge = 'מונדיאל הקבוצות'; cls = 'eu'; }
+    else if (lv === 'X') { badge = 'טורניר מועדונים'; cls = 'eu'; }
+    else if (lv === 'F') { badge = 'ידידות'; cls = 't3'; }
+    else if (lv === 'N') { badge = 'נבחרות'; cls = 'nat'; }
+    return { flag: flagOf(L.cc), badge, cls, w: L.w };
+  }
+  const leagueChips = (g, withName) => {
+    const m = leagueMeta(g.league);
+    return `${leagueLogo(g)}${m.flag ? `<span class="flag">${m.flag}</span>` : ''}${withName ? `<span class="lg">${esc(leagueTxt(g))}</span>` : ''}<span class="badge ${m.cls}">${esc(m.badge)}</span>${m.w ? '<span class="badge w">נשים</span>' : ''}`;
+  };
+  const leagueLine = g => { const m = leagueMeta(g.league); return `${m.flag ? m.flag + ' ' : ''}${leagueTxt(g)} · ${m.badge}${m.w ? ' · נשים' : ''}`; };
+  /* ---------- team + league logos ---------- */
+  const fixUrl = u => u ? String(u).replace(/ /g, '%20') : '';
+  const safeColor = c => /^#[0-9a-f]{3,8}$/i.test(String(c || '')) ? c : '#98a2b3';
+  const normName = x => String(x || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\b(fc|cf|sc|ac|afc|cd|ca|club|de|sk|fk|bk|if|the|1\d{3})\b/g, '').replace(/[^a-z0-9]/g, '');
+  function pickTeam(teams, names) {
+    const ns = names.filter(Boolean).map(normName).filter(Boolean);
+    let best = null, score = 0;
+    for (const t of teams) for (const a of ns) for (const b of [t.name, t.alias, t.abbreviation].map(normName).filter(Boolean)) {
+      const sc = a === b ? 3 : (a.length > 3 && b.length > 3 && (a.includes(b) || b.includes(a))) ? 2 : 0;
+      if (sc > score) { score = sc; best = t; }
+    }
+    return best;
+  }
+  function teamLogo(g, side, size) {
+    const logo = side === 'h' ? g.homeLogo : g.awayLogo;
+    const abbr = (side === 'h' ? g.homeAbbr : g.awayAbbr) || nm(g, side);
+    const ini = esc(String(abbr).replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase() || '•');
+    const col = safeColor(side === 'h' ? g.homeColor : g.awayColor);
+    return `<span class="tl" style="width:${size}px;height:${size}px"><i class="ini" style="background:${col};font-size:${Math.round(size * 0.36)}px">${ini}</i>` +
+      (logo ? `<img src="${esc(logo)}" alt="" loading="lazy" decoding="async" onload="var p=this.previousElementSibling;if(p)p.remove()" onerror="this.remove()">` : '') + '</span>';
+  }
+  const leagueLogo = g => { const u = S.leagueImg[g.league]; return u ? `<img class="ll" src="${esc(fixUrl(u))}" alt="" loading="lazy" decoding="async" onerror="this.remove()">` : ''; };
+  /* ---------- markets: leader, draw, trailer ---------- */
+  function leaderMarket(g) {
+    if (!g.mkts || !g.mkts.length || g.h == null || g.h === g.a) return null;
+    const leadHome = g.h > g.a;
+    const want = (leadHome ? [g.home, g.homeName] : [g.away, g.awayName]).filter(Boolean);
+    const nd = g.mkts.filter(x => !x.draw);
+    return nd.find(x => want.includes(x.name)) || (leadHome ? nd[0] : nd[nd.length - 1]) || null;
+  }
+  const drawMarket = g => (g.mkts || []).find(x => x.draw) || null;
+  function trailerMarket(g) {
+    const L = leaderMarket(g);
+    if (!L) return null;
+    return (g.mkts || []).find(x => !x.draw && x !== L) || null;
+  }
+  const tokensOf = g => { const L = leaderMarket(g), D = drawMarket(g), T = trailerMarket(g); return [L && L.yes, D && D.yes, T && T.no].filter(Boolean); };
+
+  /* ---------- order books (best ask + size) ---------- */
+  function bookOf(tok) { let b = S.books.get(tok); if (!b) { b = { asks: new Map(), bids: new Map(), at: 0 }; S.books.set(tok, b); } return b; }
+  function setBook(tok, bids, asks) {
+    const b = bookOf(tok);
+    b.asks.clear(); b.bids.clear();
+    for (const x of (asks || [])) { const p = +x.price, s = +x.size; if (p > 0 && s > 0) b.asks.set(p, s); }
+    for (const x of (bids || [])) { const p = +x.price, s = +x.size; if (p > 0 && s > 0) b.bids.set(p, s); }
+    b.at = Date.now();
+    markTok(tok);
+  }
+  function topAsk(tok) {
+    const b = tok && S.books.get(tok);
+    if (!b || !b.asks.size) return null;
+    let p = Infinity;
+    for (const q of b.asks.keys()) if (q < p) p = q;
+    return { p, s: b.asks.get(p), at: b.at };
+  }
+  const feeOf = (p, f) => { f = f || DEF_FEE; return f.rate * Math.pow(p * (1 - p), f.exp || 1); };
+
+  // the whole calculation for one game, from three order-book tops
+  function calcFrom(a, d, n, fL, fD, fN) {
+    const r = { ready: false, a, d, n };
+    if (!a || !d) return r;
+    r.ready = true;
+    r.sum = a.p + d.p;                                   // leader ask + draw ask
+    r.fee = feeOf(a.p, fL) + feeOf(d.p, fD);             // taker fees for both legs, per pair
+    r.cost = r.sum + r.fee;
+    r.net = 1 - r.cost;                                  // per pair, if the leader wins or it's a draw
+    r.shares = Math.max(0, Math.floor(S.budget / r.cost));
+    r.priceOK = cents(r.sum) <= S.maxCost + 1e-9;
+    r.liqOK = r.shares > 0 && a.s >= r.shares && d.s >= r.shares;
+    r.netOK = r.net * 100 >= MIN_NET - 1e-9;
+    r.opp = r.priceOK && r.liqOK && r.netOK;
+    r.profit = r.shares * r.net;
+    r.loss = r.shares * r.cost;
+    if (n) {                                             // same bet in one buy: "No" on the trailing team
+      r.alt = true;
+      r.altFee = feeOf(n.p, fN);
+      r.altCost = n.p + r.altFee;
+      r.altShares = Math.max(0, Math.floor(S.budget / r.altCost));
+      r.altNet = 1 - r.altCost;
+      r.altOpp = cents(n.p) <= S.maxCost + 1e-9 && r.altShares > 0 && n.s >= r.altShares && r.altNet * 100 >= MIN_NET - 1e-9;
+      r.altProfit = r.altShares * r.altNet;
+      r.altBetter = r.altCost < r.cost - 1e-9;
+    }
+    r.any = r.opp || !!r.altOpp;
+    return r;
+  }
+  function calc(g) {
+    const L = leaderMarket(g), D = drawMarket(g), T = trailerMarket(g);
+    if (!L || !D) return { ready: false, noMkts: !(g.mkts && g.mkts.length) ? 'load' : (!D ? 'nodraw' : 'load') };
+    const r = calcFrom(topAsk(L.yes), topAsk(D.yes), T && T.no ? topAsk(T.no) : null, L.fee, D.fee, T && T.fee);
+    const ats = [L.yes, D.yes].map(t => (S.books.get(t) || {}).at || 0);
+    r.fresh = Math.min(...ats) > Date.now() - BOOK_FRESH;
+    return r;
+  }
+  const reason = r => !r || !r.ready ? '' : r.any ? 'ok' : !r.priceOK ? 'price' : !r.liqOK ? 'liq' : !r.netOK ? 'net' : '';
+
+  /* ---------- opportunities + alerts ---------- */
+  // re-check one game; returns true when its place on the screen changed
+  function evalOpp(g) {
+    const wasShown = shownOpp(g);
+    g.calc = inScope(g) ? calc(g) : null;
+    const on = !!(g.calc && g.calc.any);
+    const now = Date.now();
+    if (on) {
+      if (!g.oppOn) { g.oppOn = true; g.oppStart = now; if (!g.quiet) maybeAlert(g); }
+      g.oppLast = now;
+    } else if (g.oppOn) { g.oppOn = false; g.oppEnd = now; g.quiet = false; }
+    if (!inScope(g)) { g.oppEnd = 0; g.quiet = false; }
+    return wasShown !== shownOpp(g);
+  }
+  const shownOpp = g => !!(g.oppOn || (g.oppEnd && Date.now() - g.oppEnd < GRACE && inScope(g)));
+  function maybeAlert(g) {
+    const last = S.alertedIds[g.id];
+    if (last && Date.now() - last < COOLDOWN) return;
+    fireAlert(g);
+  }
+  function bestOf(r) {
+    if (r.altOpp && (!r.opp || r.altBetter)) return { alt: true, cost: r.altCost, sum: r.n.p, profit: r.altProfit, shares: r.altShares };
+    return { alt: false, cost: r.cost, sum: r.sum, profit: r.profit, shares: r.shares };
+  }
+  function fireAlert(g) {
+    const r = g.calc, b = bestOf(r), now = Date.now();
+    g.alertAt = now; g.flashUntil = now + 90e3;
+    S.alertedIds[g.id] = now;
+    S.alerts.unshift({ t: now, id: g.id, text: `${nm(g, 'h')} ${g.h}–${g.a} ${nm(g, 'a')} · ${minuteTxt(g)} · ${b.alt ? `"לא" על ${trailerName(g)}` : 'מובילה + תיקו'} ${c1(b.sum)} · רווח ${usd(b.profit)} על ${usd0(S.budget)}` });
+    if (S.alerts.length > 50) S.alerts.length = 50;
+    persist();
+    beep(); notify(g); flashTitle(); showBanner(g);
+    scheduleRender();
+  }
+  function notify(g) {
+    try {
+      if (!CAN_NOTIFY || Notification.permission !== 'granted') return;
+      const r = g.calc, b = bestOf(r);
+      const n = new Notification(`🧮 הזדמנות! ${nm(g, 'h')} ${g.h}–${g.a} ${nm(g, 'a')}`, {
+        body: `${b.alt ? `"לא" על ${trailerName(g)}` : 'מובילה + תיקו'}: ${c1(b.sum)} · רווח נקי ≈ ${usd(b.profit)} על ${usd0(S.budget)} · ${minuteTxt(g)}`,
+        tag: 'arb-' + g.id, renotify: true, dir: 'rtl', lang: 'he',
+      });
+      n.onclick = () => { try { window.focus(); } catch (e) {} n.close(); };
+    } catch (e) {}
+  }
+  function showBanner(g) {
+    const bar = $('alertbar'); if (!bar) return;
+    const r = g.calc, b = bestOf(r);
+    bar.innerHTML = `<div class="ab"><span class="ab-ic">🧮</span><div class="ab-tx"><div><b>הזדמנות!</b> <bdi>${esc(nm(g, 'h'))} ${g.h}–${g.a} ${esc(nm(g, 'a'))}</bdi></div>` +
+      `<div class="ab-sub">${esc(minuteTxt(g))} · ${b.alt ? `"לא" על ${esc(trailerName(g))}` : 'מובילה + תיקו'}: <b class="ab-p">${c1(b.sum)}</b> · רווח נקי ${ltr(usd(b.profit))} על ${ltr(usd0(S.budget))}</div></div>` +
+      `<a class="ab-go" href="${esc(link(g))}" target="_blank" rel="noopener">פתח בפולימרקט ↗</a><button class="ab-x" title="סגור">✕</button></div>`;
+    bar.dataset.g = g.id; bar.hidden = false;
+    bar.querySelector('.ab-x').onclick = () => { bar.hidden = true; };
+    bar.querySelector('.ab-go').onclick = () => { bar.hidden = true; stopFlash(); };
+    clearTimeout(S.bannerT); S.bannerT = setTimeout(() => { bar.hidden = true; }, 120e3);
+  }
+  // after a settings change: deals that already match show up quietly; new ones from now on alert
+  function applySettings(msg) {
+    for (const g of S.games.values()) {
+      g.oppOn = false; g.oppEnd = 0; g.quiet = false;
+      g.calc = inScope(g) ? calc(g) : null;
+      if (g.calc && g.calc.any) { g.oppOn = true; g.oppStart = g.oppLast = Date.now(); g.quiet = true; }
+    }
+    persist();
+    if (msg) toast(msg);
+    render();
+  }
+  const ruleText = () => `פער ${S.gap} בדיוק${S.minFrom ? `, מדקה ${S.minFrom}` : ''}, מובילה + תיקו עד ${S.maxCost}¢`;
+  function setGap(v) { v = Math.max(1, Math.min(4, v)); if (v === S.gap) return; S.gap = v; applySettings(`🎯 סורק משחקים בפער ${v} בדיוק`); }
+  function setMin(m) { m = +m || 0; if (m === S.minFrom) return; S.minFrom = m; applySettings(m ? `🎯 רק מדקה ${m}` : '🎯 כל המשחק'); }
+  function setCost(v) { v = Math.round(Math.max(85, Math.min(99.5, v)) * 2) / 2; if (v === S.maxCost) return; S.maxCost = v; applySettings(`🎯 מתריע כשמובילה + תיקו עד ${v}¢`); }
+  function setBudget(v) { v = +v || 100; if (v === S.budget) return; S.budget = v; applySettings(`💵 השקעה: ${usd0(v)}`); }
+
+  /* ---------- sound / notification / title ---------- */
+  const CAN_NOTIFY = ('Notification' in window) && window.isSecureContext && location.origin !== 'null';
+  const audioOk = () => !!(S.audio && S.audio.state === 'running');
+  const soundReady = () => { if (audioOk() && !S.soundOn) { S.soundOn = true; renderTools(); } };
+  function unlockAudio() {
+    try {
+      if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)();
+      if (S.audio.state === 'suspended') S.audio.resume().then(soundReady).catch(() => {});
+      else soundReady();
+    } catch (e) {}
+  }
+  function tones() {
+    const ctx = S.audio;
+    if (!ctx || ctx.state !== 'running') return false;
+    let t = ctx.currentTime + 0.05;
+    for (let r = 0; r < 2; r++) {
+      for (const f of [784, 1047, 1319]) {
+        const o = ctx.createOscillator(), v = ctx.createGain();
+        o.type = 'triangle'; o.frequency.value = f;
+        v.gain.setValueAtTime(0.0001, t);
+        v.gain.exponentialRampToValueAtTime(0.45, t + 0.02);
+        v.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+        o.connect(v); v.connect(ctx.destination);
+        o.start(t); o.stop(t + 0.25);
+        t += 0.18;
+      }
+      t += 0.35;
+    }
+    return true;
+  }
+  async function beep(force) {
+    if (S.muted && !force) return false;
+    try {
+      unlockAudio();
+      if (S.audio && S.audio.state !== 'running') { try { await S.audio.resume(); } catch (e) {} }
+      return tones();
+    } catch (e) { return false; }
+  }
+  function flashTitle() {
+    if (!document.hidden && document.hasFocus()) return;
+    S.unseen++;
+    if (S.flashTimer) return;
+    let on = false;
+    S.flashTimer = setInterval(() => { on = !on; document.title = on ? `🔔 (${S.unseen}) התראה חדשה!` : BASE_TITLE; }, 1000);
+  }
+  function stopFlash() {
+    if (S.flashTimer) { clearInterval(S.flashTimer); S.flashTimer = null; }
+    S.unseen = 0; document.title = BASE_TITLE;
+  }
+  async function enableAll() {
+    S.soundOn = true; S.muted = false; persist();
+    await beep(true);
+    if (!audioOk()) S.soundOn = false;
+    renderTools();
+    if (CAN_NOTIFY && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) {} }
+    renderTools();
+  }
+  function toast(msg) {
+    const t = $('toast'); if (!t) return;
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(S.toastT); S.toastT = setTimeout(() => t.classList.remove('show'), 3000);
+  }
+  // one accidental "back" (e.g. a trackpad swipe) won't close the bot
+  function armTrap() {
+    if (S.trapArmed) return; S.trapArmed = true;
+    try { history.pushState({ bot2: 1 }, '', location.href); } catch (e) {}
+  }
+  S.onPop = () => { try { history.pushState({ bot2: 1 }, '', location.href); } catch (e) {} toast('🙂 הבוט נשאר פה. כדי לסגור אותו — סוגרים את הטאב'); };
+  window.addEventListener('popstate', S.onPop);
+  /* ---------- game data (Gamma REST) ---------- */
+  function teamsFromTitle(title) { const p = String(title || '').split(/\s+vs\.?\s+/i); return p.length === 2 ? p.map(s => s.trim()) : [null, null]; }
+  function applyEvent(g, e) {
+    if (e.slug) g.slug = e.slug;
+    if (!g.league && e.slug) g.league = e.slug.split('-')[0];
+    const [hn, an] = teamsFromTitle(e.title);
+    if (hn) { g.homeName = hn; g.awayName = an; }
+    if (!g.home) g.home = hn;
+    if (!g.away) g.away = an;
+    const teams = (e.teams || []).filter(t => t && t.name);
+    const th = pickTeam(teams, [g.home, hn]);
+    const ta = pickTeam(teams.filter(t => t !== th), [g.away, an]);
+    if (th) { g.homeAlias = th.alias || null; g.homeLogo = fixUrl(th.logo); g.homeColor = th.color; g.homeAbbr = th.abbreviation; }
+    if (ta) { g.awayAlias = ta.alias || null; g.awayLogo = fixUrl(ta.logo); g.awayColor = ta.color; g.awayAbbr = ta.abbreviation; }
+    const mk = (e.markets || []).filter(m => !m.sportsMarketType || /moneyline/i.test(m.sportsMarketType));
+    if (!mk.length) return;
+    g.mkts = mk.map(m => {
+      let toks = [];
+      try { toks = JSON.parse(m.clobTokenIds || '[]'); } catch (x) {}
+      const fs = m.feeSchedule || {};
+      const fee = m.feesEnabled === false ? { rate: 0, exp: 1 } : { rate: num(fs.rate) != null ? num(fs.rate) : DEF_FEE.rate, exp: num(fs.exponent) || 1 };
+      const name = m.groupItemTitle || '';
+      return { name, yes: toks[0] || null, no: toks[1] || null, fee, draw: /^draw/i.test(name) };
+    }).filter(m => m.yes);
+  }
+  // light lookup of a game's main event (≈20 KB) to learn its markets and order-book tokens
+  async function ensureMeta(g, force) {
+    if (g.metaLoading) return;
+    if (g.mkts && g.mkts.some(m => m.yes)) return;
+    if (!force && g.metaTried && Date.now() - g.metaTried < 60e3) return;
+    g.metaLoading = true; g.metaTried = Date.now();
+    try {
+      let e = null;
+      if (g.slug) { const a = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(g.slug)}`); e = a && a[0]; }
+      if (!e) { const a = await getJSON(`${GAMMA}/events?game_id=${g.id}&limit=1&order=id&ascending=true`); e = a && a[0]; if (e && !MAIN_RE.test(e.slug || '')) e = null; }
+      if (!e) {
+        const a = (await getJSON(`${GAMMA}/events?game_id=${g.id}`)) || [];
+        const mains = a.filter(x => MAIN_RE.test(x.slug || ''));
+        e = (mains.length ? mains : a).slice().sort((x, y) => (x.slug || '').length - (y.slug || '').length)[0];
+      }
+      if (e) applyEvent(g, e);
+    } catch (x) {}
+    g.metaLoading = false;
+    scheduleRender();
+  }
+  async function loadSports() {
+    try {
+      const sp = await getJSON(`${GAMMA}/sports`);
+      const set = new Set();
+      for (const s of sp) {
+        const code = String(s.sport || '').toLowerCase();
+        if (!code) continue;
+        S.leagueName[code] = s.name;
+        if (s.image) S.leagueImg[code] = s.image;
+        if (String(s.tags || '').split(',').includes('100350')) set.add(code);
+      }
+      if (set.size) S.soccer = set;
+    } catch (e) { S.sportsErr = String(e); }
+  }
+  async function snapshot() {
+    S.snapState = 'loading';
+    try {
+      const base = `${GAMMA}/events?tag_id=100350&closed=false&live=true&order=startTime&ascending=false&limit=100`;
+      const pages = await Promise.all([0, 100, 200].map(off => getJSON(base + '&offset=' + off).catch(() => [])));
+      let all = pages.flat();
+      for (let off = 300; pages[pages.length - 1].length === 100 && off < 600; off += 100) {
+        const arr = await getJSON(base + '&offset=' + off).catch(() => []);
+        pages.push(arr); all = all.concat(arr);
+      }
+      const now = Date.now();
+      for (const e of all) {
+        if (!MAIN_RE.test(e.slug || '') || e.gameId == null || !PLAY.has(e.period)) continue;
+        const sc = /^(\d+)-(\d+)$/.exec(String(e.score || '').trim());
+        if (!sc) continue;
+        let g = S.games.get(e.gameId);
+        const isNew = !g;
+        if (!g) { g = { id: e.gameId, firstSeen: now }; S.games.set(e.gameId, g); }
+        g.league = (e.slug.split('-')[0] || '').toLowerCase();
+        applyEvent(g, e);
+        if (isNew || !g.wsAt || g.wsAt < S.snapStart) {
+          g.h = +sc[1]; g.a = +sc[2]; g.period = e.period; g.elapsed = e.elapsed; g.live = e.live; g.ended = e.ended; g.lastSeen = now;
+        }
+        evalOpp(g);
+      }
+      S.snapState = 'ok'; S.lastSnap = now; S.snapCount = all.length;
+    } catch (x) { S.snapState = 'err'; S.snapErr = String(x); }
+    scheduleRender();
+  }
+
+  /* ---------- live scores (Sports WebSocket) ---------- */
+  function onGame(m) {
+    if (!m || m.gameId == null) return;
+    const lg = String(m.leagueAbbreviation || '').toLowerCase();
+    if (S.soccer ? !S.soccer.has(lg) : !PLAY.has(m.period)) return;
+    const sc = /^(\d+)-(\d+)$/.exec(String(m.score || '').trim());
+    let g = S.games.get(m.gameId);
+    if (!g) { if (!sc) return; g = { id: m.gameId, firstSeen: Date.now() }; S.games.set(m.gameId, g); }
+    if (m.homeTeam) g.home = m.homeTeam;
+    if (m.awayTeam) g.away = m.awayTeam;
+    for (const k of ['status', 'period', 'elapsed', 'live', 'ended']) if (m[k] !== undefined && m[k] !== null) g[k] = m[k];
+    if (m.slug && MAIN_RE.test(m.slug)) g.slug = m.slug;
+    if (sc) { g.h = +sc[1]; g.a = +sc[2]; }
+    g.league = lg; g.lastSeen = g.wsAt = Date.now();
+    if (isPlay(g) && gapOK(g)) ensureMeta(g); // markets, tokens and logos (light, once per game)
+    evalOpp(g);
+    scheduleRender();
+  }
+  S.onGame = onGame;
+  function connect() {
+    if (S.stopped) return;
+    S.wsState = 'connecting'; renderTools();
+    let ws;
+    try { ws = new WebSocket(WS_URL); } catch (e) { S.wsState = 'closed'; return setTimeout(connect, 5000); }
+    S.ws = ws;
+    ws.onopen = () => {
+      S.wsState = 'open'; S.lastMsg = Date.now(); S.backoff = 1000; renderTools();
+      if (S.closedAt && Date.now() - S.closedAt > 60e3 && Date.now() - S.lastSnap > 10 * 60e3) { S.snapStart = Date.now(); snapshot(); }
+      S.closedAt = 0;
+    };
+    ws.onmessage = ev => {
+      S.lastMsg = Date.now();
+      if (ev.data === 'ping') { if (ws.readyState === 1) ws.send('pong'); return; }
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      (Array.isArray(m) ? m : [m]).forEach(onGame);
+    };
+    ws.onclose = () => {
+      if (S.ws !== ws) return;
+      S.wsState = 'closed'; if (!S.closedAt) S.closedAt = Date.now(); renderTools();
+      if (!S.stopped) setTimeout(connect, S.backoff = Math.min(S.backoff * 2, 30e3));
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+  /* ---------- live prices (CLOB market WebSocket + order-book refresh) ---------- */
+  function markTok(tok) { const gid = S.tokGame.get(tok); if (gid != null) markDirty(gid); }
+  function onMkt(x) {
+    if (!x) return;
+    if (x.event_type === 'book') { if (S.subs.has(x.asset_id)) { setBook(x.asset_id, x.bids, x.asks); S.mLast = Date.now(); } return; }
+    if (x.event_type !== 'price_change') return;
+    for (const c of (x.price_changes || [])) {
+      if (!S.subs.has(c.asset_id)) continue;
+      const b = S.books.get(c.asset_id);
+      if (!b) { syncSoon(c.asset_id); continue; }
+      const side = c.side === 'SELL' ? b.asks : b.bids;
+      const p = +c.price, s = +c.size;
+      if (p > 0) { if (s > 0) side.set(p, s); else side.delete(p); }
+      // keep the local book consistent with the best prices the exchange reports
+      const ba = num(c.best_ask), bb = num(c.best_bid);
+      if (ba > 0) {
+        for (const q of [...b.asks.keys()]) if (q < ba - 1e-9) b.asks.delete(q);
+        if (!b.asks.has(ba)) syncSoon(c.asset_id);
+      }
+      if (bb > 0) for (const q of [...b.bids.keys()]) if (q > bb + 1e-9) b.bids.delete(q);
+      b.at = S.mLast = Date.now();
+      markTok(c.asset_id);
+    }
+  }
+  // read full order books over REST (all tracked tokens in a few requests)
+  async function syncBooks(toks) {
+    toks = (toks || [...S.subs]).filter(t => S.subs.has(t));
+    for (let i = 0; i < toks.length; i += 40) {
+      const chunk = toks.slice(i, i + 40);
+      try {
+        const r = await fetch(`${CLOB}/books`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chunk.map(t => ({ token_id: t }))), cache: 'no-store' });
+        if (!r.ok) continue;
+        const arr = await r.json();
+        for (const b of (arr || [])) if (b && S.subs.has(b.asset_id)) setBook(b.asset_id, b.bids, b.asks);
+      } catch (e) {}
+    }
+  }
+  function syncSoon(tok) {
+    if (tok) S.pend.add(tok);
+    if (S.syncT) return;
+    S.syncT = setTimeout(() => { S.syncT = null; const t = [...S.pend]; S.pend.clear(); if (t.length) syncBooks(t); }, 700);
+  }
+  function mktSend(o) { const ws = S.mws; if (ws && ws.readyState === 1) { ws.send(JSON.stringify(o)); return true; } return false; }
+  function subscribe(toks) {
+    const add = toks.filter(t => t && !S.subs.has(t));
+    if (!add.length) return;
+    add.forEach(t => { S.subs.add(t); S.pend.add(t); });
+    syncSoon();
+    if (!S.mws || S.mws.readyState !== 1) return; // sent on (re)connect
+    if (!S.mInit) S.mInit = mktSend({ assets_ids: [...S.subs], type: 'market', custom_feature_enabled: true });
+    else mktSend({ assets_ids: add, operation: 'subscribe' });
+  }
+  function unsubscribe(toks) {
+    const rm = toks.filter(t => S.subs.has(t));
+    if (!rm.length) return;
+    rm.forEach(t => { S.subs.delete(t); S.books.delete(t); S.tokGame.delete(t); });
+    if (S.mInit) mktSend({ assets_ids: rm, operation: 'unsubscribe' });
+  }
+  // stream three order books for every live game with the chosen gap: leader "Yes", draw "Yes", trailer "No"
+  function syncSubs() {
+    const want = new Set();
+    for (const g of S.games.values()) {
+      if (!isPlay(g) || !gapOK(g)) continue;
+      if (!g.mkts || !g.mkts.some(m => m.yes)) { ensureMeta(g); continue; }
+      for (const t of tokensOf(g)) { want.add(t); S.tokGame.set(t, g.id); }
+    }
+    subscribe([...want]);
+    unsubscribe([...S.subs].filter(t => !want.has(t)));
+  }
+  function connectMkt() {
+    if (S.stopped) return;
+    S.mwsState = 'connecting'; S.mInit = false;
+    let ws;
+    try { ws = new WebSocket(MKT_WS); } catch (e) { S.mwsState = 'closed'; return setTimeout(connectMkt, 5000); }
+    S.mws = ws;
+    ws.onopen = () => {
+      S.mwsState = 'open'; S.mBackoff = 1000; S.mLastAny = Date.now();
+      if (S.subs.size) S.mInit = mktSend({ assets_ids: [...S.subs], type: 'market', custom_feature_enabled: true });
+      if (S.mPing) clearInterval(S.mPing);
+      S.mPing = setInterval(() => { if (ws.readyState === 1) ws.send('PING'); }, 10e3);
+      renderTools();
+    };
+    ws.onmessage = ev => {
+      S.mLastAny = Date.now();
+      if (ev.data === 'PONG') return;
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (Array.isArray(m)) m.forEach(onMkt); else onMkt(m);
+    };
+    ws.onclose = () => {
+      if (S.mws !== ws) return;
+      S.mwsState = 'closed'; S.mInit = false; renderTools();
+      if (!S.stopped) setTimeout(connectMkt, S.mBackoff = Math.min(S.mBackoff * 2, 30e3));
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+  /* ---------- in-place updates (no full re-render) ---------- */
+  function markDirty(id) {
+    S.dirty.add(id);
+    if (!S.rafPending) { S.rafPending = true; requestAnimationFrame(flushDirty); }
+  }
+  function flushDirty() {
+    S.rafPending = false;
+    let moved = false;
+    for (const id of S.dirty) { const g = S.games.get(id); if (!g) continue; if (evalOpp(g)) moved = true; paint(g); }
+    S.dirty.clear();
+    if (moved) scheduleRender();
+  }
+  function tick(el, dir) {
+    if (!el || !dir) return;
+    el.classList.remove('tick-up', 'tick-dn');
+    void el.offsetWidth;
+    el.classList.add(dir > 0 ? 'tick-up' : 'tick-dn');
+  }
+  function paint(g) {
+    const r = g.calc;
+    const card = document.querySelector(`#opps .card[data-g="${g.id}"]`);
+    if (card) {
+      const box = card.querySelector('.calc'), html = calcHTML(g);
+      if (box && box.dataset.h !== html) {
+        box.innerHTML = html; box.dataset.h = html;
+        if (r && r.ready && g.shownSum != null) tick(box.querySelector('.sum'), r.sum < g.shownSum - 1e-9 ? 1 : r.sum > g.shownSum + 1e-9 ? -1 : 0);
+      }
+      const st = card.querySelector('.st');
+      if (st) { const t = statusTxt(g); if (st.textContent !== t) st.textContent = t; st.className = 'st' + (g.oppOn ? ' open' : ''); }
+      card.classList.toggle('closed', !g.oppOn);
+    }
+    const row = document.querySelector(`#watch .row[data-g="${g.id}"]`);
+    if (row) {
+      const pc = row.querySelector('.pc'), t = r && r.ready ? c1(r.sum) : '';
+      if (pc && pc.textContent !== t) { pc.textContent = t; if (r && r.ready && g.shownSum != null) tick(pc, r.sum < g.shownSum - 1e-9 ? 1 : r.sum > g.shownSum + 1e-9 ? -1 : 0); }
+      const why = row.querySelector('.why'), w = whyHTML(g);
+      if (why && why.dataset.h !== w) { why.innerHTML = w; why.dataset.h = w; }
+    }
+    if (r && r.ready) g.shownSum = r.sum;
+  }
+
+  /* ---------- render ---------- */
+  const statusTxt = g => g.demo ? '🧪 דוגמה' : g.oppOn ? '● פתוחה עכשיו' : `נסגרה ${secsAgo(g.oppEnd)}`;
+  function calcHTML(g) {
+    const r = g.calc, ln = esc(leaderName(g)), tn = esc(trailerName(g));
+    if (!r) return '';
+    if (!r.ready) return `<div class="wait">${r.noMkts === 'nodraw' ? 'אין שוק תיקו למשחק הזה' : 'טוען מחירים מספר הפקודות…'}</div>`;
+    const sz = (s, need) => s >= need ? `${shares(s)} מניות` : `<span class="bad">${shares(s)} מניות · צריך ${shares(need)}</span>`;
+    const lsCls = (s, need) => 'ls' + (s >= need ? '' : ' bad');
+    const legs = `<div class="legs">` +
+      `<div class="leg"><span class="lk">מובילה · <b>${ln}</b></span><span class="lp">${c1(r.a.p)}</span><span class="${lsCls(r.a.s, r.shares)}">${sz(r.a.s, r.shares)}</span></div>` +
+      `<div class="leg"><span class="lk">תיקו</span><span class="lp">${c1(r.d.p)}</span><span class="${lsCls(r.d.s, r.shares)}">${sz(r.d.s, r.shares)}</span></div>` +
+      `<div class="leg tot${r.priceOK ? ' ok' : ''}"><span class="lk">סך עלות</span><span class="lp sum">${c1(r.sum)}</span><span class="ls">+ עמלות ${c2(r.fee)}</span></div></div>`;
+    const money = r.net > 0
+      ? `<div class="money"><div class="win${r.opp ? '' : ' off'}">השקעה ${ltr(usd0(S.budget))} | רווח נקי ${ltr(usd(r.profit))} <span class="m">(${shares(r.shares)} זוגות מניות · אם ${ln} מנצחת או תיקו)</span></div>` +
+        `<div class="risk">אם <b>${tn}</b> מנצחת: ${ltr('−' + usd(r.loss))}</div></div>`
+      : `<div class="money"><div class="win off">אין רווח: העלות עם העמלות מעל $1 לזוג</div></div>`;
+    let alt = '';
+    if (r.alt && r.n) {
+      const best = r.altBetter;
+      alt = `<div class="alt${best && r.altOpp ? ' best' : ''}">${best ? 'זול יותר' : 'אפשר גם'} בקנייה אחת: "לא" על <b>${tn}</b> ב-${ltr(c1(r.n.p))}` +
+        (best && r.altNet > 0 ? ` · רווח נקי ${ltr(usd(r.altProfit))}` : '') + (r.n.s < r.altShares ? ` · <span class="bad">חסרה נזילות</span>` : '') + `</div>`;
+    }
+    return legs + money + alt;
+  }
+  const tr = (g, side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="tn">${teamLogo(g, side, 24)}<span class="nm">${esc(nm(g, side))}</span></span><span class="gl">${goals}</span></div>`;
+  function cardHTML(g) {
+    const leadHome = g.h > g.a;
+    const isNew = g.flashUntil && Date.now() < g.flashUntil;
+    const html = calcHTML(g);
+    const cls = 'card' + (g.demo ? ' demo' : '') + (!g.oppOn && !g.demo ? ' closed' : '') + (isNew ? ' new' : '');
+    const head = `<div class="meta"><span class="lgw">${g.demo ? '<span class="badge demo">דמו</span>' : ''}${leagueChips(g, false)}</span><span class="min">${esc(minuteTxt(g))}</span></div><div class="lgn">${esc(leagueTxt(g))}</div>`;
+    const body = `<div class="board">${tr(g, 'h', g.h, leadHome)}${tr(g, 'a', g.a, !leadHome)}</div><div class="calc" data-h="${esc(html)}">${html}</div>`;
+    const foot = `<div class="foot"><span class="st${g.oppOn ? ' open' : ''}">${esc(statusTxt(g))}</span><span class="go">${g.demo ? 'דוגמה בלבד' : 'פתח בפולימרקט ↗'}</span></div>`;
+    if (g.calc && g.calc.ready) g.shownSum = g.calc.sum;
+    return g.demo
+      ? `<div class="${cls}" data-g="${g.id}">${head}${body}${foot}</div>`
+      : `<a class="${cls}" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener">${head}${body}${foot}</a>`;
+  }
+  const cardKey = g => [g.h, g.a, minuteTxt(g), g.alertAt || 0, (g.flashUntil && Date.now() < g.flashUntil) ? 1 : 0, nm(g, 'h'), nm(g, 'a'), leagueTxt(g),
+    g.slug || '', g.homeLogo || '', g.awayLogo || '', S.leagueImg[g.league] ? 1 : 0, g.demo ? 1 : 0, g.oppOn ? 1 : 0].join('|');
+  function whyHTML(g) {
+    if (waiting(g)) return `<span class="badge wt">⏳ דקה ${S.minFrom}</span>`;
+    const r = g.calc;
+    if (!r || !r.ready) return `<span class="badge no">${r && r.noMkts === 'nodraw' ? 'אין שוק תיקו' : 'טוען מחיר'}</span>`;
+    const k = reason(r);
+    if (k === 'ok') return '<span class="badge ok">✅ הזדמנות</span>';
+    if (k === 'price') return `<span class="badge no">יקר ב-${c1(r.sum - S.maxCost / 100)}</span>`;
+    if (k === 'liq') return '<span class="badge bad">חסרה נזילות</span>';
+    if (k === 'net') return '<span class="badge no">רווח קטן מדי</span>';
+    return '';
+  }
+  function rowHTML(g) {
+    const leadHome = g.h > g.a, r = g.calc;
+    const w = whyHTML(g);
+    if (r && r.ready) g.shownSum = r.sum;
+    return `<a class="row" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener"><span class="min">${esc(shortMin(g))}</span>` +
+      `<span class="teams">${teamLogo(g, 'h', 18)}<span class="tnm ${leadHome ? 'ld' : ''}">${esc(nm(g, 'h'))}</span><b>${g.h}–${g.a}</b><span class="tnm ${leadHome ? '' : 'ld'}">${esc(nm(g, 'a'))}</span>${teamLogo(g, 'a', 18)}</span>` +
+      `<span class="pc" title="מובילה + תיקו (מחירי קנייה עכשיו)">${r && r.ready ? c1(r.sum) : ''}</span><span class="lgc"><span class="why" data-h="${esc(w)}">${w}</span>${leagueChips(g, true)}</span></a>`;
+  }
+  const rowKey = g => [waiting(g) ? 'w' + S.minFrom : '', g.h, g.a, shortMin(g), nm(g, 'h'), nm(g, 'a'), leagueTxt(g), g.slug || '', g.homeLogo || '', g.awayLogo || '', S.leagueImg[g.league] ? 1 : 0].join('|');
+  // update a list in place: only changed items are rebuilt, so live prices and animations keep running smoothly
+  function patch(box, items, keyOf, htmlOf, emptyHTML) {
+    if (!items.length) { if (box.dataset.empty !== emptyHTML) { box.innerHTML = emptyHTML; box.dataset.empty = emptyHTML; } return; }
+    delete box.dataset.empty;
+    const cur = [...box.children].filter(c => c.dataset && c.dataset.g);
+    const make = g => { const t = document.createElement('template'); t.innerHTML = htmlOf(g).trim(); const el = t.content.firstElementChild; el.dataset.k = keyOf(g); return el; };
+    const same = cur.length === box.children.length && cur.length === items.length && items.every((g, i) => cur[i].dataset.g === String(g.id));
+    if (same) { items.forEach((g, i) => { if (cur[i].dataset.k !== keyOf(g)) cur[i].replaceWith(make(g)); }); return; }
+    const byId = new Map(cur.map(c => [c.dataset.g, c]));
+    const frag = document.createDocumentFragment();
+    for (const g of items) { const old = byId.get(String(g.id)); frag.appendChild(old && old.dataset.k === keyOf(g) ? old : make(g)); }
+    box.replaceChildren(frag);
+  }
+  function renderTools() {
+    const scoresOk = S.wsState === 'open' && Date.now() - S.lastMsg < 20e3;
+    const pricesOk = S.mwsState === 'open' && Date.now() - S.mLastAny < 25e3;
+    const lp = $('live'), lt = $('liveTx');
+    if (lp && lt) {
+      lp.className = 'livepill' + (scoresOk && pricesOk ? ' ok' : (S.wsState === 'closed' ? ' bad' : ''));
+      lt.textContent = scoresOk && pricesOk ? 'חי' : S.wsState === 'closed' ? 'מנותק · מתחבר…' : scoresOk ? 'מחירים מתעכבים' : 'מתחבר…';
+      lp.title = `תוצאות: ${scoresOk ? 'חי' : 'מתחבר'} · מחירים: ${pricesOk ? 'חי' : 'מתחבר'}`;
+    }
+    const snd = $('snd');
+    if (snd) {
+      const on = S.soundOn && audioOk() && !S.muted;
+      snd.textContent = on ? '🔔' : '🔕';
+      snd.title = on ? 'הצליל פועל · לחץ להשתקה' : 'הצליל כבוי · לחץ להפעלה';
+    }
+    const cta = $('cta');
+    if (cta) {
+      if (!S.soundOn || !audioOk()) { cta.hidden = false; cta.className = 'cta'; cta.textContent = (CAN_NOTIFY && Notification.permission === 'default') ? '🔔 לחץ כאן כדי להפעיל צליל והתראות' : '🔔 לחץ פעם אחת כדי להפעיל את הצליל'; }
+      else if (CAN_NOTIFY && Notification.permission === 'default') { cta.hidden = false; cta.className = 'cta soft'; cta.textContent = '💬 רוצה הודעה קופצת גם כשאתה בחלון אחר? לחץ כאן'; }
+      else cta.hidden = true;
+    }
+    document.querySelectorAll('#opps .card[data-g] .st').forEach(el => { const g = S.games.get(+el.closest('.card').dataset.g); if (g && !g.oppOn) el.textContent = statusTxt(g); });
+  }
+  // three sample cards, clearly marked, so the design can be seen without live deals
+  const DEMO = [
+    { id: 'demo1', league: 'fl1', home: 'ליון', away: 'ליל', homeAbbr: 'OL', awayAbbr: 'LIL', homeColor: '#1d4ed8', awayColor: '#dc2626', h: 2, a: 0, elapsed: '65', period: '2H', L: [0.94, 250], D: [0.02, 150], N: [0.955, 300] },
+    { id: 'demo2', league: 'lal', home: 'ברצלונה', away: 'סביליה', homeAbbr: 'FCB', awayAbbr: 'SEV', homeColor: '#a50044', awayColor: '#e11d48', h: 3, a: 1, elapsed: '72', period: '2H', L: [0.935, 410], D: [0.023, 320], N: [0.962, 500] },
+    { id: 'demo3', league: 'ere', home: 'אייאקס', away: 'פיינורד', homeAbbr: 'AJA', awayAbbr: 'FEY', homeColor: '#c8102e', awayColor: '#111827', h: 2, a: 0, elapsed: '81', period: '2H', L: [0.946, 180], D: [0.012, 900], N: [0.951, 260] },
+  ];
+  const demoGames = () => DEMO.map(d => {
+    const top = x => ({ p: x[0], s: x[1], at: Date.now() });
+    return Object.assign({}, d, { demo: true, oppOn: true, calc: calcFrom(top(d.L), top(d.D), top(d.N), DEF_FEE, DEF_FEE, DEF_FEE) });
+  });
+  function render() {
+    S.renderPending = false;
+    syncSubs();
+    const play = [...S.games.values()].filter(isPlay);
+    const byMin = (x, y) => minuteOf(y) - minuteOf(x);
+    const live = play.filter(shownOpp).sort((x, y) => (y.oppOn - x.oppOn) || (bestOf(y.calc || {}).profit || 0) - (bestOf(x.calc || {}).profit || 0));
+    const opps = S.demo ? live.concat(demoGames()) : live;
+    const scope = play.filter(g => inScope(g) && !shownOpp(g)).sort((x, y) => ((x.calc && x.calc.ready ? x.calc.sum : 9) - (y.calc && y.calc.ready ? y.calc.sum : 9)) || byMin(x, y));
+    const wait = play.filter(waiting).sort(byMin);
+    const watch = scope.concat(wait);
+    $('kOpp').textContent = live.filter(g => g.oppOn).length;
+    $('kWatch').textContent = watch.length;
+    $('kLive').textContent = play.length;
+    $('gapV').textContent = S.gap;
+    $('costV').textContent = S.maxCost + '¢';
+    $('minSel').value = String(S.minFrom);
+    $('budSel').value = String(S.budget);
+    $('summary').textContent = `צריך כ-${shares(Math.ceil(S.budget / (S.maxCost / 100)))} מניות בכל צד`;
+    $('headline').innerHTML = `מובילה + תיקו ב-<span dir="ltr">${S.maxCost}¢</span> או פחות? <span class="nw">תקבל התראה מיד.</span>`;
+    $('subTx').innerHTML = `הבוט סורק משחקי כדורגל חיים בפער ${S.gap} בדיוק${S.minFrom ? ` מדקה ${S.minFrom}` : ''}, ובודק כמה עולה לקנות יחד "המובילה מנצחת" + "תיקו" — כולל עמלות וכמה מניות זמינות. כשזה זול מספיק — הוא מתריע. <b>שים לב: אם הקבוצה שבפיגור מנצחת, מפסידים את כל הסכום. הבוט רק מתריע, לא קונה ולא מוכר.</b>`;
+    $('oppHint').textContent = ruleText();
+    $('watchHint').textContent = `משחקים בפער ${S.gap} בדיוק — מהזול ליקר`;
+    $('demoBtn').classList.toggle('on', S.demo);
+    $('demoBtn').textContent = S.demo ? '🧪 דמו פועל' : '🧪 דמו';
+    $('demoBar').hidden = !S.demo;
+    const loading = S.snapState !== 'ok' && S.snapState !== 'err' && Date.now() - S.startedAt < WARMUP;
+    const sk = '<div class="card sk-card"><div class="sk sk-l" style="width:45%"></div><div class="sk sk-b"></div><div class="sk sk-b"></div><div class="sk sk-p"></div></div>';
+    patch($('opps'), opps, cardKey, cardHTML, loading ? sk : `<div class="empty listen"><div class="radar">🧮</div><div><b>אין כרגע הזדמנות</b><br>הבוט בודק כל משחק בפער ${S.gap} בדיוק${S.minFrom ? ` מדקה ${S.minFrom}` : ''}. ברגע שמובילה + תיקו ירדו ל-${S.maxCost}¢ — תשמע צפצוף ותקבל הודעה.</div></div>`);
+    patch($('watch'), watch, rowKey, rowHTML, `<div class="empty">${loading ? 'טוען משחקים…' : `אין כרגע משחק בפער ${S.gap} בדיוק`}</div>`);
+    for (const g of live.concat(watch)) paint(g);
+    const lb = $('logBtn'), lbox = $('log');
+    lb.hidden = !S.alerts.length;
+    lb.textContent = S.showLog ? '▴ הסתר היסטוריה' : `היסטוריית הזדמנויות (${S.alerts.length}) ▾`;
+    lbox.hidden = !S.showLog || !S.alerts.length;
+    if (!lbox.hidden) lbox.innerHTML = S.alerts.slice(0, 15).map(a => `<div>${hhmm(a.t)} · <bdi>${esc(a.text)}</bdi></div>`).join('');
+    renderTools();
+  }
+  function scheduleRender() { if (S.renderPending) return; S.renderPending = true; setTimeout(render, 250); }
+  S.render = render;
+  S.calcFrom = calcFrom;
+
+  /* ---------- wiring ---------- */
+  $('gMinus').onclick = () => setGap(S.gap - 1);
+  $('gPlus').onclick = () => setGap(S.gap + 1);
+  $('cMinus').onclick = () => setCost(S.maxCost - 0.5);
+  $('cPlus').onclick = () => setCost(S.maxCost + 0.5);
+  $('minSel').onchange = e => setMin(e.target.value);
+  $('budSel').onchange = e => setBudget(e.target.value);
+  $('demoBtn').onclick = () => { S.demo = !S.demo; toast(S.demo ? '🧪 מצב דמו: 3 כרטיסים לדוגמה' : '✅ חזרה לנתונים חיים'); render(); };
+  $('cta').onclick = () => enableAll();
+  $('snd').onclick = async () => {
+    if (!S.soundOn || !audioOk()) return enableAll();
+    S.muted = !S.muted; persist();
+    if (!S.muted) { await beep(true); toast('🔔 הצליל פועל'); } else toast('🔕 הצליל כבוי — הבאנר וההודעות ממשיכים');
+    renderTools();
+  };
+  $('logBtn').onclick = () => { S.showLog = !S.showLog; render(); };
+  document.addEventListener('click', e => { if (e.target.closest && e.target.closest('a.card, a.row, .ab-go')) stopFlash(); }, true);
+  document.addEventListener('pointerdown', () => { unlockAudio(); armTrap(); }, true);
+  window.addEventListener('focus', stopFlash);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && document.hasFocus()) stopFlash(); });
+
+  const clock = () => { const el = $('clock'); if (el) el.textContent = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); };
+  clock();
+  S.timers.push(setInterval(clock, 1000));
+  S.timers.push(setInterval(() => {
+    const now = Date.now();
+    for (const [id, g] of S.games) {
+      const age = now - (g.lastSeen || 0);
+      if (isEnded(g) ? age > 3 * 60e3 : age > (g.period === 'HT' ? 45 : 35) * 60e3) S.games.delete(id);
+    }
+    if (S.ws && S.wsState === 'open' && now - S.lastMsg > 25e3) { try { S.ws.close(); } catch (e) {} }
+    if (S.mws && S.mwsState === 'open' && now - S.mLastAny > 30e3) { try { S.mws.close(); } catch (e) {} }
+    scheduleRender();
+  }, 15e3));
+  S.timers.push(setInterval(() => { let moved = false; for (const g of S.games.values()) if (evalOpp(g)) moved = true; if (moved) scheduleRender(); renderTools(); }, 5e3));
+  S.timers.push(setInterval(() => { if (S.subs.size) syncBooks(); }, 20e3));
+
+  try { if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)(); if (S.audio.state === 'running') S.soundOn = true; } catch (e) {}
+  render();
+  await loadSports();
+  connect();
+  connectMkt();
+  S.snapStart = Date.now();
+  snapshot();
+  return 'arb v1 started';
+})();
+
+</script>
+</body>
+</html>
