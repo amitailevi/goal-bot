@@ -4,11 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="light dark">
 <title>⚽ בוט 2 שערים</title>
 </head>
 <body>
 <script>
-/* ⚽ בוט 2 שערים — Polymarket live soccer 2-goal-lead alert */
+/* ⚽ בוט 2 שערים — Polymarket live soccer 2-goal-lead alert (v7) */
 (async () => {
   const GAMMA = 'https://gamma-api.polymarket.com';
   const CLOB = 'https://clob.polymarket.com';
@@ -27,7 +28,8 @@
   const fresh = t => Date.now() - t < 6 * 3600e3;
 
   const S = window.__bot2 = {
-    thr: (OLD && OLD.thr) || saved.thr || 2, games: new Map(), soccer: null, leagueName: {},
+    thr: (OLD && OLD.thr) || saved.thr || 2, muted: OLD ? !!OLD.muted : !!saved.muted,
+    games: new Map(), soccer: null, leagueName: {},
     alerts: (OLD && OLD.alerts) || (saved.alerts || []).filter(a => a && fresh(a.t)),
     alertedIds: (OLD && OLD.alertedIds) || saved.alertedIds || {},
     ws: null, wsState: 'connecting', lastMsg: 0, backoff: 1000, closedAt: 0,
@@ -35,6 +37,7 @@
     subs: new Set(), px: new Map(), tokGame: new Map(), dirty: new Set(), rafPending: false,
     startedAt: Date.now(), audio: (OLD && OLD.audio) || null, soundOn: !!(OLD && OLD.soundOn), unseen: 0, flashTimer: null,
     timers: [], stopped: false, snapState: 'idle', lastSnap: 0, renderPending: false, trapArmed: false,
+    showCold: false, showLog: false,
   };
   for (const k of Object.keys(S.alertedIds)) if (!fresh(S.alertedIds[k])) delete S.alertedIds[k];
   S.stop = () => {
@@ -46,102 +49,161 @@
     try { S.ws && S.ws.close(); } catch (e) {}
     try { S.mws && S.mws.close(); } catch (e) {}
   };
-  const persist = () => { try { sessionStorage.setItem(SS_KEY, JSON.stringify({ thr: S.thr, alerts: S.alerts.slice(0, 50), alertedIds: S.alertedIds })); } catch (e) {} };
+  const persist = () => { try { sessionStorage.setItem(SS_KEY, JSON.stringify({ thr: S.thr, muted: S.muted, alerts: S.alerts.slice(0, 50), alertedIds: S.alertedIds })); } catch (e) {} };
 
   /* ---------- page ---------- */
   const CSS = `
-:root{--bg:#f4f6fb;--card:#fff;--ink:#0f172a;--mut:#64748b;--line:#e6eaf2;--blue:#1652f0;--green:#12a150;--greenbg:#ebfaf2;--greenln:#bdecd1;--amber:#f59e0b;--red:#e11d48}
+:root{--bg:#f3f5fa;--card:#fff;--ink:#0f172a;--mut:#64748b;--line:#e5e9f2;--soft:#f5f7fb;--blue:#1652f0;--green:#0f9d4c;--greenbg:#eafaf1;--greenln:#bfe9d2;--red:#e11d48;--redbg:#fff1f3;--amber:#f59e0b;--amberbg:#fff7e6;--shadow:0 6px 22px rgba(15,23,42,.06)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1220;--card:#121b2f;--ink:#e6eaf3;--mut:#94a3b8;--line:#22304d;--soft:#18233c;--blue:#5b8cff;--green:#2fd27a;--greenbg:#0f2a1f;--greenln:#1f5c3e;--red:#ff6b86;--redbg:#2c1218;--amber:#fbbf24;--amberbg:#2b220e;--shadow:0 6px 22px rgba(0,0,0,.35)}}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Heebo,Assistant,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1000px;margin:0 auto;padding:28px 20px 44px}
-.top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
-h1{margin:0;font-size:30px;font-weight:800;letter-spacing:-.3px}
-.sub{margin:4px 0 0;color:var(--mut);font-size:15px}
-.pills{display:flex;gap:8px;flex-wrap:wrap}
-.pill{background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 14px;font-size:14px;font-weight:600;white-space:nowrap}
-.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:22px 0 14px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px 16px}
-.ctrl{display:flex;align-items:center;gap:10px;font-size:16px}
-.round{width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:#f8fafc;font-size:20px;cursor:pointer;line-height:1;color:var(--ink)}
-.round:hover{background:#eef2ff}
-.thr{font-size:24px;min-width:26px;text-align:center}
-.btns{display:flex;gap:8px;align-items:center}
-.cta{border:0;border-radius:14px;padding:12px 18px;font:inherit;font-size:16px;font-weight:700;cursor:pointer;background:var(--amber);color:#1f1300;box-shadow:0 6px 18px rgba(245,158,11,.35);animation:pulse 1.6s infinite}
-.cta.on{background:var(--greenbg);color:var(--green);box-shadow:none;animation:none;border:1px solid var(--greenln);cursor:default}
-.ghost{border:1px solid var(--line);background:#fff;border-radius:12px;padding:9px 12px;font:inherit;font-size:14px;cursor:pointer;color:var(--ink)}
-@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-.kpi{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;text-align:center}
-.kpi .n{font-size:34px;font-weight:800;line-height:1.1}
-.kpi .l{color:var(--mut);font-size:14px;margin-top:4px}
+a{color:inherit;text-decoration:none}
+a:focus-visible,button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.num,.n,.gl,.pv,.pc,.min,.wv,.lv,.wp{font-variant-numeric:tabular-nums}
+.wrap{max-width:1040px;margin:0 auto;padding:24px 18px 44px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:48px;height:48px;border-radius:14px;background:var(--card);box-shadow:var(--shadow);display:grid;place-items:center;font-size:28px}
+h1{margin:0;font-size:26px;font-weight:800;letter-spacing:-.3px}
+.sub{margin:2px 0 0;color:var(--mut);font-size:14px}
+.tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stepper{display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 10px;font-size:14px;color:var(--mut)}
+.stepper button{width:30px;height:30px;border-radius:50%;border:0;background:var(--soft);color:var(--ink);font-size:18px;cursor:pointer;line-height:1}
+.stepper button:hover{filter:brightness(.95)}
+.stepper b{min-width:18px;text-align:center;color:var(--ink);font-size:17px}
+.icon{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--card);font-size:18px;cursor:pointer}
+.livepill{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:9px 14px;font-size:14px;font-weight:600;white-space:nowrap}
+.livepill .dot{background:var(--amber)}
+.livepill.ok .dot{background:#22c55e;animation:ping 1.6s infinite}
+.livepill.bad .dot{background:var(--red)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#cbd5e1;flex:none}
+.dot.on{background:#22c55e;animation:ping 1.6s infinite}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgba(34,197,94,.5)}70%{box-shadow:0 0 0 7px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+.cta{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;margin:16px 0 0;border:0;border-radius:16px;padding:14px 18px;font:inherit;font-size:16px;font-weight:700;cursor:pointer;background:var(--amber);color:#1f1300;box-shadow:0 8px 22px rgba(245,158,11,.3);animation:pulse 1.8s infinite}
+.cta.soft{background:var(--card);color:var(--blue);border:1px solid var(--line);box-shadow:none;animation:none;font-weight:600}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.015)}}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px;text-align:center;box-shadow:var(--shadow)}
+.kpi .n{font-size:32px;font-weight:800;line-height:1.1}
+.kpi .l{color:var(--mut);font-size:14px;margin-top:2px}
 .kpi.hot{background:var(--greenbg);border-color:var(--greenln)}
 .kpi.hot .n{color:var(--green)}
-h2{font-size:19px;margin:28px 0 10px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-h2 a{font-size:14px;font-weight:600;color:var(--blue);text-decoration:none}
+.sec{font-size:18px;margin:26px 0 10px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sec .hint{font-size:13px;font-weight:500;color:var(--mut)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-.card{background:var(--card);border:2px solid var(--greenln);border-radius:20px;padding:16px 18px;box-shadow:0 6px 20px rgba(15,23,42,.05)}
-.card.flash{border-color:var(--amber);animation:glow 1s ease-in-out infinite alternate}
-@keyframes glow{from{box-shadow:0 0 0 0 rgba(245,158,11,0)}to{box-shadow:0 0 0 8px rgba(245,158,11,.28)}}
-.meta{display:flex;justify-content:space-between;align-items:center;color:var(--mut);font-size:13px;font-weight:600;gap:8px}
-.min{background:#fee2e2;color:var(--red);border-radius:8px;padding:2px 8px;font-weight:700;font-size:13px;white-space:nowrap;text-align:center}
-.board{direction:ltr;margin:12px 0 8px;display:flex;flex-direction:column;gap:6px}
-.tr{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#f6f8fc;border-radius:12px;padding:8px 12px}
-.tr .nm{font-size:17px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tr .gl{font-size:26px;font-weight:800;min-width:22px;text-align:right}
+.card{display:block;background:var(--card);border:2px solid var(--greenln);border-radius:20px;padding:14px 16px;box-shadow:var(--shadow);transition:transform .15s,box-shadow .15s}
+.card:hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(15,23,42,.1)}
+.card.new{border-color:var(--amber);animation:glow 1s ease-in-out infinite alternate}
+@keyframes glow{from{box-shadow:0 0 0 0 rgba(245,158,11,0)}to{box-shadow:0 0 0 8px rgba(245,158,11,.25)}}
+.meta{display:flex;justify-content:space-between;align-items:center;gap:8px;color:var(--mut);font-size:13px;font-weight:600}
+.meta .lg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.min{background:var(--redbg);color:var(--red);border-radius:8px;padding:2px 8px;font-weight:700;font-size:13px;white-space:nowrap;text-align:center}
+.prog{height:4px;background:var(--soft);border-radius:4px;margin:10px 0 2px;overflow:hidden}
+.prog i{display:block;height:100%;background:linear-gradient(to left,#94a3b8,var(--red));border-radius:4px}
+.board{direction:ltr;margin:10px 0 8px;display:flex;flex-direction:column;gap:6px}
+.tr{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--soft);border-radius:12px;padding:7px 12px}
+.tr .nm{font-size:16px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr .gl{font-size:24px;font-weight:800;min-width:22px;text-align:right}
 .tr.lead{background:var(--greenbg)}
 .tr.lead .nm,.tr.lead .gl{color:var(--green);font-weight:800}
-.lead{color:var(--green);font-weight:800!important}
-.ld{font-weight:800}
-.price{font-size:15px;margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.price bdi,.math bdi,.pc,.pv,.math .up,.math .dn{direction:ltr;unicode-bidi:isolate}
-.pv{display:inline-block;padding:1px 7px;border-radius:8px;font-size:17px;font-weight:800}
-.math{font-size:13px;color:var(--mut);margin-top:6px;border-radius:8px;padding:2px 0}
-.math .up{color:var(--green);font-weight:700}
-.math .dn{color:var(--red);font-weight:700}
-.live{display:inline-block;width:8px;height:8px;border-radius:50%;background:#cbd5e1}
-.live.on{background:#22c55e;animation:ping 1.6s infinite}
-@keyframes ping{0%{box-shadow:0 0 0 0 rgba(34,197,94,.55)}70%{box-shadow:0 0 0 7px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
-.livetx{font-size:12px;color:var(--mut)}
+.pbox{background:var(--soft);border-radius:14px;padding:10px 12px;margin-top:8px}
+.plabel{font-size:13px;color:var(--mut)}
+.plabel b{color:var(--ink)}
+.prow{display:flex;align-items:center;gap:8px;margin-top:2px}
+.pv{font-size:30px;font-weight:800;line-height:1.15;padding:0 6px;border-radius:8px;direction:ltr;unicode-bidi:isolate}
+.pd{font-size:12px;font-weight:700;color:var(--mut)}
+.pd.up{color:var(--green)}
+.pd.dn{color:var(--red)}
+.ret{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;font-size:13px}
+.ret>span{border-radius:10px;padding:4px 8px;background:var(--card);border:1px solid var(--line)}
+.ret .win b,.ret .win .wp{color:var(--green)}
+.ret .lose b{color:var(--red)}
+.ret b,.ret .wp{direction:ltr;unicode-bidi:isolate}
 .tick-up{animation:tup 1s ease-out}
 .tick-dn{animation:tdn 1s ease-out}
-@keyframes tup{0%{background:#bbf7d0}100%{background:transparent}}
-@keyframes tdn{0%{background:#fecdd3}100%{background:transparent}}
+@keyframes tup{0%{background:rgba(34,197,94,.38)}100%{background:transparent}}
+@keyframes tdn{0%{background:rgba(244,63,94,.35)}100%{background:transparent}}
 .foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:13px;color:var(--mut);gap:8px}
-.go{background:var(--blue);color:#fff;text-decoration:none;border-radius:12px;padding:9px 14px;font-weight:700;font-size:14px;white-space:nowrap}
-.go:hover{filter:brightness(1.08)}
-.empty{grid-column:1/-1;background:var(--card);border:1px dashed #d5dbe7;border-radius:18px;padding:22px;text-align:center;color:var(--mut);font-size:15px}
-.list{background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
-.list .empty{border:0;border-radius:0}
-.row{display:grid;grid-template-columns:70px 1fr 74px 150px;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid var(--line);font-size:15px}
+.go{background:var(--blue);color:#fff;border-radius:12px;padding:9px 14px;font-weight:700;font-size:14px;white-space:nowrap}
+.card:hover .go{filter:brightness(1.08)}
+.empty{grid-column:1/-1;background:var(--card);border:1px dashed var(--line);border-radius:18px;padding:18px;color:var(--mut);font-size:15px;text-align:center}
+.listen{display:flex;align-items:center;gap:16px;text-align:right;justify-content:center}
+.listen b{color:var(--ink)}
+.radar{position:relative;width:54px;height:54px;border-radius:50%;background:var(--greenbg);display:grid;place-items:center;font-size:24px;flex:none}
+.radar:after{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid var(--green);animation:radar 2s ease-out infinite}
+@keyframes radar{0%{transform:scale(1);opacity:.8}100%{transform:scale(1.6);opacity:0}}
+.sk{background:linear-gradient(90deg,var(--soft),var(--line),var(--soft));background-size:200% 100%;animation:sh 1.3s infinite;border-radius:10px}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.sk-card{border-color:var(--line);min-height:210px;display:flex;flex-direction:column;gap:10px}
+.sk-l{height:14px}.sk-b{height:38px}.sk-p{height:52px}
+.list{background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden;box-shadow:var(--shadow)}
+.list .empty{border:0;border-radius:0;box-shadow:none}
+.row{display:grid;grid-template-columns:64px 1fr 70px 150px;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--line);font-size:15px}
 .row:first-child{border-top:0}
-.row.q{background:var(--greenbg)}
+.row:hover{background:var(--soft)}
 .row .teams{direction:ltr;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row .teams b{margin:0 10px}
+.ld{font-weight:800}
 .row .lg{color:var(--mut);font-size:13px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pc{font-weight:700;font-size:14px;text-align:center;border-radius:8px;padding:3px 6px;background:#f1f5f9}
+.pc{font-weight:700;font-size:14px;text-align:center;border-radius:8px;padding:3px 6px;background:var(--soft);direction:ltr;unicode-bidi:isolate}
 .pc:empty{background:none}
-.log{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:4px 16px}
+.more{display:block;width:100%;margin:12px 0 0;padding:11px;border-radius:14px;border:1px dashed var(--line);background:transparent;color:var(--mut);font:inherit;font-size:14px;cursor:pointer}
+.more:hover{background:var(--card)}
+.log{margin-top:10px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:4px 16px}
 .log div{padding:9px 0;border-top:1px solid var(--line);font-size:14px}
 .log div:first-child{border-top:0}
-footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-align:center}
-.tip{margin-top:14px;background:#eef3ff;border:1px solid #d6e2ff;color:#1e3a8a;border-radius:14px;padding:10px 14px;font-size:14px;text-align:center}
-.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#0f172a;color:#fff;padding:12px 18px;border-radius:12px;font-size:15px;opacity:0;transition:.25s;pointer-events:none;z-index:9}
+.how{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 16px;font-size:14px}
+.how summary{cursor:pointer;font-weight:700}
+.how ul{margin:10px 0 2px;padding-inline-start:20px;line-height:1.8;color:var(--mut)}
+footer{margin-top:22px;color:var(--mut);font-size:13px;line-height:1.8;text-align:center}
+.alertbar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:20;width:min(760px,calc(100% - 24px))}
+.ab{display:flex;align-items:center;gap:12px;background:var(--amberbg);border:2px solid var(--amber);border-radius:18px;padding:12px 14px;box-shadow:0 14px 40px rgba(0,0,0,.18);animation:drop .35s ease-out}
+@keyframes drop{from{transform:translateY(-16px);opacity:0}to{transform:none;opacity:1}}
+.ab-ic{font-size:26px}
+.ab-tx{flex:1;font-size:15px}
+.ab-tx bdi{font-weight:700}
+.ab-p{direction:ltr;unicode-bidi:isolate}
+.ab-go{background:var(--blue);color:#fff;border-radius:12px;padding:9px 12px;font-weight:700;font-size:14px;white-space:nowrap}
+.ab-x{border:0;background:transparent;font-size:18px;cursor:pointer;color:var(--mut)}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#0f172a;color:#fff;padding:12px 18px;border-radius:12px;font-size:15px;opacity:0;transition:.25s;pointer-events:none;z-index:30}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-@media (max-width:640px){.kpi .n{font-size:26px}.row{grid-template-columns:56px 1fr 64px}.row .lg{display:none}h1{font-size:24px}}
+@media (max-width:640px){.wrap{padding:16px 12px 36px}h1{font-size:22px}.kpi .n{font-size:26px}.row{grid-template-columns:52px 1fr 60px}.row .lg{display:none}.ab{flex-wrap:wrap}.ab-tx{flex-basis:70%}}
 `;
-  const HTML = `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${BASE_TITLE}</title>
+  const HTML = `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="color-scheme" content="light dark"><title>${BASE_TITLE}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='88'%3E%E2%9A%BD%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;600;700;800&display=swap"><style>${CSS}</style></head>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap"><style>${CSS}</style></head>
 <body><div class="wrap">
-<header class="top"><div><h1>⚽ בוט 2 שערים</h1><p class="sub">מצפצף כשקבוצה מובילה בפער של <b class="thrTxt">2</b>+ שערים · כדורגל חי בפולימרקט</p></div><div class="pills"><div id="status" class="pill">🟡 תוצאות…</div><div id="pstatus" class="pill">🟡 מחירים…</div></div></header>
-<section class="bar"><div class="ctrl"><span>התראה מפער של</span><button id="minus" class="round" title="פחות">−</button><b id="thr" class="thr">2</b><button id="plus" class="round" title="יותר">+</button><span>שערים</span></div>
-<div class="btns"><button id="test" class="ghost" style="display:none">🔈 בדיקת צליל</button><button id="enable" class="cta">🔔 הפעל צליל והתראות</button></div></section>
-<section class="kpis"><div class="kpi"><div class="n" id="kLive">–</div><div class="l">משחקים חיים</div></div><div class="kpi hot"><div class="n" id="kHot">–</div><div class="l">בפער <span class="thrTxt">2</span>+ עכשיו</div></div><div class="kpi"><div class="n" id="kAlerts">0</div><div class="l">התראות מאז שהופעל</div></div></section>
-<h2>🔥 פער <span class="thrTxt">2</span>+ עכשיו</h2><section id="hot" class="cards"></section>
-<h2>כל המשחקים החיים <a href="https://polymarket.com/sports/soccer/games" target="_blank" rel="noopener">לכל המשחקים בפולימרקט ↗</a></h2><section id="all" class="list"></section>
-<h2>📜 התראות אחרונות</h2><section id="log" class="log"></section>
-<div class="tip">💡 המחירים מתעדכנים בזמן אמת, כמו בפולימרקט: ירוק = עלה, אדום = ירד. אפשר לרענן — הבוט חוזר לבד.</div>
-<footer>הבוט רק מתריע — לא קונה ולא מוכר.<br>התוצאות והמחירים מגיעים מפולימרקט, לפעמים באיחור קטן.<br>כדי שיעבוד: להשאיר את הטאב הזה פתוח ואת המחשב ער.</footer>
-</div><div id="toast" class="toast"></div></body>`;
+<header class="top">
+  <div class="brand"><div class="logo">⚽</div><div><h1>בוט 2 שערים</h1><p class="sub">מתריע כשקבוצה מובילה ב-<b class="thrPlus" dir="ltr">2+</b> שערים · כדורגל חי בפולימרקט</p></div></div>
+  <div class="tools">
+    <div class="stepper" title="מאיזה פער להתריע"><span>התראה מפער</span><button id="minus" aria-label="פחות">−</button><b id="thr">2</b><button id="plus" aria-label="יותר">+</button></div>
+    <button id="snd" class="icon" title="צליל">🔔</button>
+    <div id="live" class="livepill" title=""><span class="dot"></span><span id="liveTx">מתחבר…</span></div>
+  </div>
+</header>
+<button id="cta" class="cta" hidden></button>
+<section class="kpis">
+  <div class="kpi hot"><div class="n" id="kHot">–</div><div class="l">🔥 בפער <span class="thrPlus" dir="ltr">2+</span></div></div>
+  <div class="kpi"><div class="n" id="kWarm">–</div><div class="l">👀 קרוב לפער</div></div>
+  <div class="kpi"><div class="n" id="kLive">–</div><div class="l">⚽ משחקים חיים</div></div>
+</section>
+<h2 class="sec"><span>🔥 בפער <span class="thrPlus" dir="ltr">2+</span> עכשיו</span></h2>
+<section id="hot" class="cards"></section>
+<h2 class="sec" id="warmH"><span>👀 קרוב לפער</span><span class="hint" id="warmHint">קבוצה מובילה, אבל עוד לא בפער של 2</span></h2>
+<section id="warm" class="list"></section>
+<button id="coldBtn" class="more" hidden></button>
+<section id="cold" class="list" hidden style="margin-top:10px"></section>
+<button id="logBtn" class="more" hidden></button>
+<section id="log" class="log" hidden></section>
+<details class="how"><summary>❓ איך זה עובד?</summary><ul>
+<li>התוצאות מגיעות בזמן אמת מפולימרקט.</li>
+<li>כשקבוצה מגיעה לפער שבחרת — יש צפצוף, הודעה קופצת, והכרטיס עולה למעלה.</li>
+<li>המחיר הוא מחיר הקנייה הכי זול עכשיו של "כן, הקבוצה המובילה תנצח", ישר מספר הפקודות.</li>
+<li>אם הקבוצה מנצחת, כל מניה שווה $1. כלומר: קונים ב-87¢ → מנצחת = +13¢ (+15%), לא מנצחת = מפסידים את ה-87¢.</li>
+<li>הבוט רק מתריע — לא קונה ולא מוכר.</li></ul></details>
+<footer>נתונים: Polymarket · לפעמים באיחור קטן<br>כדי שיעבוד: להשאיר את הטאב פתוח ואת המחשב ער</footer>
+</div><div id="alertbar" class="alertbar" hidden></div><div id="toast" class="toast"></div></body>`;
   document.documentElement.innerHTML = HTML;
   document.documentElement.setAttribute('dir', 'rtl');
   document.documentElement.setAttribute('lang', 'he');
@@ -156,6 +218,7 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     (PLAY.has(g.period) || ['InProgress', 'Break', 'PenaltyShootout'].includes(g.status));
   const diffOf = g => Math.abs(g.h - g.a);
   const qual = g => isPlay(g) && diffOf(g) >= S.thr;
+  const warmQ = g => isPlay(g) && diffOf(g) >= 1 && diffOf(g) < S.thr;
   const nm = (g, side) => side === 'h' ? (g.homeAlias || g.home || g.homeName || '?') : (g.awayAlias || g.away || g.awayName || '?');
   const minuteTxt = g => {
     const p = g.period, e = String(g.elapsed == null ? '' : g.elapsed).trim();
@@ -174,11 +237,20 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     if (p === 'PEN') return 'פנדלים';
     return e ? `${e}'` : (p || '');
   };
+  const progress = g => {
+    const p = g.period, e = parseInt(g.elapsed, 10);
+    if (p === 'HT') return 50;
+    if (p === 'PEN' || /ET/.test(p || '')) return 100;
+    if (isFinite(e)) return Math.max(3, Math.min(100, e / 90 * 100));
+    return p === '2H' ? 75 : 25;
+  };
   const leagueTxt = g => S.leagueName[g.league] || String(g.league || '').toUpperCase();
   const hhmm = t => new Date(t).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+  const ago = t => { const s = Math.max(0, (Date.now() - t) / 1000); if (s < 45) return 'עכשיו'; const m = Math.round(s / 60); return m < 60 ? `לפני ${m} דק׳` : `לפני ${Math.round(m / 60)} שע׳`; };
   const link = g => g.slug ? `https://polymarket.com/sports/${g.league}/${g.slug}` : 'https://polymarket.com/sports/soccer/games';
   const getJSON = async url => { const r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); };
   const fmtC = c => (c >= 99 || c < 1) ? String(Math.min(99.9, Math.max(0.1, Math.round(c * 10) / 10))) : String(Math.round(c));
+  const pct = c => { const v = (100 - c) / c * 100; return v < 1 ? String(Math.max(0.1, Math.round(v * 10) / 10)) : String(Math.round(v)); };
 
   function leaderMarket(g) {
     if (!g.mkts || !g.mkts.length || g.h == null || g.h === g.a) return null;
@@ -208,7 +280,8 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
 
   /* ---------- sound / notification / title ---------- */
   const CAN_NOTIFY = ('Notification' in window) && window.isSecureContext && location.origin !== 'null';
-  const soundReady = () => { if (S.audio && S.audio.state === 'running' && !S.soundOn) { S.soundOn = true; render(); } };
+  const audioOk = () => !!(S.audio && S.audio.state === 'running');
+  const soundReady = () => { if (audioOk() && !S.soundOn) { S.soundOn = true; renderTools(); } };
   function unlockAudio() {
     try {
       if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)();
@@ -235,7 +308,8 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     }
     return true;
   }
-  async function beep() {
+  async function beep(force) {
+    if (S.muted && !force) return false;
     try {
       unlockAudio();
       if (S.audio && S.audio.state !== 'running') { try { await S.audio.resume(); } catch (e) {} }
@@ -258,28 +332,47 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     S.unseen++;
     if (S.flashTimer) return;
     let on = false;
-    S.flashTimer = setInterval(() => { on = !on; document.title = on ? `🔔 (${S.unseen}) פער ${S.thr}+!` : BASE_TITLE; }, 1000);
+    S.flashTimer = setInterval(() => { on = !on; document.title = on ? `🔔 (${S.unseen}) התראה חדשה!` : BASE_TITLE; }, 1000);
   }
   function stopFlash() {
     if (S.flashTimer) { clearInterval(S.flashTimer); S.flashTimer = null; }
     S.unseen = 0; document.title = BASE_TITLE;
   }
+  async function enableAll() {
+    S.soundOn = true; S.muted = false; persist();
+    await beep(true);
+    if (!audioOk()) S.soundOn = false;
+    renderTools();
+    if (CAN_NOTIFY && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) {} }
+    renderTools();
+  }
 
   /* ---------- alert logic ---------- */
+  function showBanner(g) {
+    const bar = $('alertbar'); if (!bar) return;
+    const L = leaderInfo(g);
+    bar.innerHTML = `<div class="ab"><span class="ab-ic">⚽</span><div class="ab-tx"><b>פער ${diffOf(g)}!</b> <bdi>${esc(nm(g, 'h'))} ${g.h}–${g.a} ${esc(nm(g, 'a'))}</bdi> · ${esc(minuteTxt(g))} · <span class="ab-pl">${L.cents != null ? `${esc(L.leaderName)} לניצחון <b class="ab-p">${fmtC(L.cents)}¢</b>` : ''}</span></div>` +
+      `<a class="ab-go" href="${esc(link(g))}" target="_blank" rel="noopener">פתח בפולימרקט ↗</a><button class="ab-x" title="סגור">✕</button></div>`;
+    bar.dataset.g = g.id; bar.hidden = false;
+    bar.querySelector('.ab-x').onclick = () => { bar.hidden = true; };
+    bar.querySelector('.ab-go').onclick = () => { bar.hidden = true; stopFlash(); };
+    clearTimeout(S.bannerT); S.bannerT = setTimeout(() => { bar.hidden = true; }, 120e3);
+  }
   function fireAlert(g) {
     g.alerted = true; g.known = false; g.alertAt = Date.now(); g.flashUntil = Date.now() + 90e3;
+    g.alertC = leaderInfo(g).cents;
     S.alertedIds[g.id] = g.alertAt;
     S.alerts.unshift({ t: g.alertAt, id: g.id, text: `${nm(g, 'h')} ${g.h}–${g.a} ${nm(g, 'a')} · ${minuteTxt(g)} · ${leagueTxt(g)}` });
     if (S.alerts.length > 50) S.alerts.length = 50;
     persist();
-    beep(); notify(g); flashTitle();
+    beep(); notify(g); flashTitle(); showBanner(g);
     ensureMeta(g, true);
     scheduleRender();
   }
   function evaluate(g, prevDiff, src) {
     if (!qual(g)) {
       if (g.h == null || diffOf(g) < S.thr) {
-        g.alerted = false; g.known = false; g.alertAt = null;
+        g.alerted = false; g.known = false; g.alertAt = null; g.alertC = null;
         // only a live (WebSocket) score may cancel an earlier alert — the REST snapshot can lag
         if (src === 'ws' && S.alertedIds[g.id]) { delete S.alertedIds[g.id]; persist(); }
       }
@@ -300,12 +393,13 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
       else { g.alerted = false; g.known = false; g.alertAt = null; delete S.alertedIds[g.id]; }
     }
     persist();
+    toast(`🎯 עכשיו מתריע מפער של ${v} שערים ומעלה`);
     render();
   }
   function toast(msg) {
     const t = $('toast'); if (!t) return;
     t.textContent = msg; t.classList.add('show');
-    clearTimeout(S.toastT); S.toastT = setTimeout(() => t.classList.remove('show'), 3500);
+    clearTimeout(S.toastT); S.toastT = setTimeout(() => t.classList.remove('show'), 3000);
   }
   // one accidental "back" (e.g. a trackpad swipe) won't close the bot
   function armTrap() {
@@ -436,19 +530,20 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     if (sc) { g.h = +sc[1]; g.a = +sc[2]; }
     g.league = lg; g.lastSeen = g.wsAt = Date.now();
     evaluate(g, prev, 'ws');
-    if (g.h !== g.a && isPlay(g)) ensureMeta(g); // a team leads → get its market so prices stream before a 2nd goal
+    if (g.h !== g.a && isPlay(g)) ensureMeta(g); // a team leads → get its market so prices stream before the next goal
     scheduleRender();
   }
   S.onGame = onGame;
+  S.showBanner = g => showBanner(g);
 
   function connect() {
     if (S.stopped) return;
-    S.wsState = 'connecting'; renderStatus();
+    S.wsState = 'connecting'; renderTools();
     let ws;
     try { ws = new WebSocket(WS_URL); } catch (e) { S.wsState = 'closed'; return setTimeout(connect, 5000); }
     S.ws = ws;
     ws.onopen = () => {
-      S.wsState = 'open'; S.lastMsg = Date.now(); S.backoff = 1000; renderStatus();
+      S.wsState = 'open'; S.lastMsg = Date.now(); S.backoff = 1000; renderTools();
       if (S.closedAt && Date.now() - S.closedAt > 60e3 && Date.now() - S.lastSnap > 10 * 60e3) { S.snapStart = Date.now(); snapshot(); }
       S.closedAt = 0;
     };
@@ -460,7 +555,7 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     };
     ws.onclose = () => {
       if (S.ws !== ws) return;
-      S.wsState = 'closed'; if (!S.closedAt) S.closedAt = Date.now(); renderStatus();
+      S.wsState = 'closed'; if (!S.closedAt) S.closedAt = Date.now(); renderTools();
       if (!S.stopped) setTimeout(connect, S.backoff = Math.min(S.backoff * 2, 30e3));
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
@@ -532,7 +627,7 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
       if (S.subs.size) S.mInit = mktSend({ assets_ids: [...S.subs], type: 'market', custom_feature_enabled: true });
       if (S.mPing) clearInterval(S.mPing);
       S.mPing = setInterval(() => { if (ws.readyState === 1) ws.send('PING'); }, 10e3);
-      renderStatus();
+      renderTools();
     };
     ws.onmessage = ev => {
       S.mLastAny = Date.now();
@@ -542,13 +637,13 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     };
     ws.onclose = () => {
       if (S.mws !== ws) return;
-      S.mwsState = 'closed'; S.mInit = false; renderStatus();
+      S.mwsState = 'closed'; S.mInit = false; renderTools();
       if (!S.stopped) setTimeout(connectMkt, S.mBackoff = Math.min(S.mBackoff * 2, 30e3));
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
-  /* ---------- fast price painting (no full re-render) ---------- */
+  /* ---------- in-place price painting (no re-render) ---------- */
   function markDirty(id) {
     S.dirty.add(id);
     if (!S.rafPending) { S.rafPending = true; requestAnimationFrame(flushDirty); }
@@ -564,115 +659,164 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     void el.offsetWidth;
     el.classList.add(dir > 0 ? 'tick-up' : 'tick-dn');
   }
+  function deltaInfo(g, c) {
+    if (!g.alertAt || g.alertC == null || c == null) return { cls: 'pd', txt: '' };
+    const d = c - g.alertC;
+    if (Math.abs(d) < 0.5) return { cls: 'pd', txt: 'ללא שינוי מאז ההתראה' };
+    return { cls: 'pd ' + (d > 0 ? 'up' : 'dn'), txt: `${d > 0 ? '▲' : '▼'} ${fmtC(Math.abs(d))}¢ מאז ההתראה` };
+  }
   function paintPrice(g) {
     const L = leaderInfo(g);
     if (L.cents == null) return;
+    if (g.alertAt && g.alertC == null) g.alertC = L.cents;
     const txt = fmtC(L.cents) + '¢';
     const dir = g.shownC == null ? 0 : (L.cents > g.shownC + 0.05 ? 1 : L.cents < g.shownC - 0.05 ? -1 : 0);
     const card = document.querySelector(`.card[data-g="${g.id}"]`);
     if (card) {
       const pv = card.querySelector('.pv');
-      if (!pv) { scheduleRender(); }
+      if (!pv) scheduleRender();
       else if (pv.textContent !== txt) {
         pv.textContent = txt;
-        const up = card.querySelector('.math .up'), dn = card.querySelector('.math .dn');
-        if (up) up.textContent = '+' + fmtC(100 - L.cents) + '¢';
-        if (dn) dn.textContent = '−' + txt;
-        tick(pv, dir); tick(card.querySelector('.math'), dir);
+        const set = (sel, v) => { const el = card.querySelector(sel); if (el) el.textContent = v; };
+        set('.wv', '+' + fmtC(100 - L.cents) + '¢');
+        set('.wp', '(+' + pct(L.cents) + '%)');
+        set('.lv', '−' + txt);
+        const d = deltaInfo(g, L.cents), pd = card.querySelector('.pd');
+        if (pd) { pd.className = d.cls; pd.textContent = d.txt; }
+        tick(pv, dir); tick(card.querySelector('.ret'), dir);
       }
-      const dot = card.querySelector('.live');
+      const dot = card.querySelector('.prow .dot');
       if (dot) dot.classList.toggle('on', pxFresh(g));
     }
     const chip = document.querySelector(`.row[data-g="${g.id}"] .pc`);
     if (chip && chip.textContent !== txt) { chip.textContent = txt; tick(chip, dir); }
+    const bar = $('alertbar');
+    if (bar && !bar.hidden && bar.dataset.g === String(g.id)) { const p = bar.querySelector('.ab-p'); if (p) p.textContent = txt; }
     g.shownC = L.cents;
   }
 
   /* ---------- render ---------- */
   function cardHTML(g) {
     const L = leaderInfo(g), leadHome = g.h > g.a;
-    const flash = g.flashUntil && Date.now() < g.flashUntil;
-    let price = `<div class="price">💰 טוען מחיר…</div>`;
+    const isNew = g.flashUntil && Date.now() < g.flashUntil;
+    let pbox;
     if (L.cents != null) {
-      const c = fmtC(L.cents), up = fmtC(100 - L.cents);
-      price = `<div class="price">💰 מחיר לניצחון של המובילה: <b class="pv">${c}¢</b><span class="live${pxFresh(g) ? ' on' : ''}"></span><span class="livetx">חי</span></div>` +
-        `<div class="math">אם מנצחת: <b class="up">+${up}¢</b> · אם לא: <b class="dn">−${c}¢</b> (לכל מניה)</div>`;
+      if (g.alertAt && g.alertC == null) g.alertC = L.cents;
+      const c = fmtC(L.cents), d = deltaInfo(g, L.cents);
+      pbox = `<div class="pbox"><div class="plabel">מחיר קנייה לניצחון של <b>${esc(L.leaderName)}</b></div>` +
+        `<div class="prow"><span class="pv">${c}¢</span><span class="dot${pxFresh(g) ? ' on' : ''}" title="מתעדכן בזמן אמת"></span><span class="${d.cls}">${d.txt}</span></div>` +
+        `<div class="ret" title="לכל מניה. אם הקבוצה מנצחת — כל מניה שווה $1"><span class="win">✅ מנצחת: <b class="wv">+${fmtC(100 - L.cents)}¢</b> <span class="wp">(+${pct(L.cents)}%)</span></span><span class="lose">❌ לא: <b class="lv">−${c}¢</b></span></div></div>`;
       g.shownC = L.cents;
-    } else if (g.metaTried && !g.metaLoading && !g.mkts) price = '';
-    const when = g.alertAt ? `🔔 התראה ב-${hhmm(g.alertAt)}` : 'היה בפער מההתחלה';
-    const tr = (side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="nm">${esc(nm(g, side))}</span><span class="gl">${goals}</span></div>`;
-    return `<div class="card${flash ? ' flash' : ''}" data-g="${g.id}"><div class="meta"><span>${esc(leagueTxt(g))}</span><span class="min">${esc(minuteTxt(g))}</span></div>` +
-      `<div class="board">${tr('h', g.h, leadHome)}${tr('a', g.a, !leadHome)}</div>` +
-      `${price}<div class="foot"><span>${when}</span><a class="go" href="${esc(link(g))}" target="_blank" rel="noopener">פתח בפולימרקט ↗</a></div></div>`;
-  }
-  function rowHTML(g) {
-    const q = qual(g), leadHome = g.h > g.a, lead = g.h !== g.a;
-    const cls = side => !lead ? '' : ((side === 'h') === leadHome ? (q ? 'lead' : 'ld') : '');
-    const L = lead ? leaderInfo(g) : { cents: null };
-    const chip = L.cents != null ? fmtC(L.cents) + '¢' : '';
-    return `<div class="row${q ? ' q' : ''}" data-g="${g.id}"><span class="min">${esc(shortMin(g))}</span>` +
-      `<span class="teams"><span class="${cls('h')}">${esc(nm(g, 'h'))}</span><b>${g.h}–${g.a}</b><span class="${cls('a')}">${esc(nm(g, 'a'))}</span></span>` +
-      `<span class="pc" title="מחיר לניצחון של הקבוצה המובילה">${chip}</span><span class="lg">${esc(leagueTxt(g))}</span></div>`;
-  }
-  function renderStatus() {
-    const el = $('status'), pe = $('pstatus');
-    if (el) {
-      const age = Date.now() - S.lastMsg;
-      if (S.wsState === 'open' && age < 20e3) el.textContent = '🟢 תוצאות חיות';
-      else if (S.wsState === 'closed') el.textContent = '🔴 תוצאות · מתחבר מחדש…';
-      else el.textContent = '🟡 תוצאות…';
+    } else {
+      pbox = `<div class="pbox"><div class="plabel">מחיר קנייה לניצחון של <b>${esc(L.leaderName)}</b></div><div class="sk sk-l" style="margin-top:8px;width:60%"></div></div>`;
     }
-    if (pe) {
-      if (S.mwsState === 'open' && Date.now() - S.mLastAny < 25e3) pe.textContent = '🟢 מחירים חיים';
-      else if (S.mwsState === 'closed') pe.textContent = '🟡 מחירים · כל 30 שניות';
-      else pe.textContent = '🟡 מחירים…';
+    const when = g.alertAt ? `<span class="ago" data-t="${g.alertAt}">🔔 ${ago(g.alertAt)}</span>` : '<span>היה בפער מההתחלה</span>';
+    const tr = (side, goals, lead) => `<div class="tr${lead ? ' lead' : ''}"><span class="nm">${esc(nm(g, side))}</span><span class="gl">${goals}</span></div>`;
+    return `<a class="card${isNew ? ' new' : ''}" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener">` +
+      `<div class="meta"><span class="lg">${esc(leagueTxt(g))}</span><span class="min">${esc(minuteTxt(g))}</span></div>` +
+      `<div class="prog"><i style="width:${progress(g).toFixed(0)}%"></i></div>` +
+      `<div class="board">${tr('h', g.h, leadHome)}${tr('a', g.a, !leadHome)}</div>` +
+      `${pbox}<div class="foot">${when}<span class="go">פתח בפולימרקט ↗</span></div></a>`;
+  }
+  const cardKey = g => [g.h, g.a, minuteTxt(g), progress(g).toFixed(0), g.alertAt || 0, (g.flashUntil && Date.now() < g.flashUntil) ? 1 : 0,
+    nm(g, 'h'), nm(g, 'a'), leagueTxt(g), leaderInfo(g).cents != null ? 1 : 0, g.slug || ''].join('|');
+  function rowHTML(g) {
+    const leadHome = g.h > g.a, lead = g.h !== g.a;
+    const cls = side => (lead && (side === 'h') === leadHome) ? 'ld' : '';
+    const L = lead ? leaderInfo(g) : { cents: null };
+    if (L.cents != null) g.shownC = L.cents;
+    return `<a class="row" data-g="${g.id}" href="${esc(link(g))}" target="_blank" rel="noopener"><span class="min">${esc(shortMin(g))}</span>` +
+      `<span class="teams"><span class="${cls('h')}">${esc(nm(g, 'h'))}</span><b>${g.h}–${g.a}</b><span class="${cls('a')}">${esc(nm(g, 'a'))}</span></span>` +
+      `<span class="pc" title="מחיר קנייה לניצחון של המובילה">${L.cents != null ? fmtC(L.cents) + '¢' : ''}</span><span class="lg">${esc(leagueTxt(g))}</span></a>`;
+  }
+  const rowKey = g => [g.h, g.a, shortMin(g), nm(g, 'h'), nm(g, 'a'), leagueTxt(g), (g.h !== g.a && leaderInfo(g).cents != null) ? 1 : 0, g.slug || ''].join('|');
+  // update a list in place: only changed items are rebuilt, so live prices and animations keep running smoothly
+  function patch(box, items, keyOf, htmlOf, emptyHTML) {
+    if (!items.length) { if (box.dataset.empty !== emptyHTML) { box.innerHTML = emptyHTML; box.dataset.empty = emptyHTML; } return; }
+    delete box.dataset.empty;
+    const cur = [...box.children].filter(c => c.dataset && c.dataset.g);
+    const make = g => { const t = document.createElement('template'); t.innerHTML = htmlOf(g).trim(); const el = t.content.firstElementChild; el.dataset.k = keyOf(g); return el; };
+    const same = cur.length === box.children.length && cur.length === items.length && items.every((g, i) => cur[i].dataset.g === String(g.id));
+    if (same) { items.forEach((g, i) => { if (cur[i].dataset.k !== keyOf(g)) cur[i].replaceWith(make(g)); }); return; }
+    const byId = new Map(cur.map(c => [c.dataset.g, c]));
+    const frag = document.createDocumentFragment();
+    for (const g of items) { const old = byId.get(String(g.id)); frag.appendChild(old && old.dataset.k === keyOf(g) ? old : make(g)); }
+    box.replaceChildren(frag);
+  }
+  function renderTools() {
+    const scoresOk = S.wsState === 'open' && Date.now() - S.lastMsg < 20e3;
+    const pricesOk = S.mwsState === 'open' && Date.now() - S.mLastAny < 25e3;
+    const lp = $('live'), lt = $('liveTx');
+    if (lp && lt) {
+      lp.className = 'livepill' + (scoresOk && pricesOk ? ' ok' : (S.wsState === 'closed' ? ' bad' : ''));
+      lt.textContent = scoresOk && pricesOk ? 'חי' : S.wsState === 'closed' ? 'מנותק · מתחבר…' : scoresOk ? 'מחירים מתעכבים' : 'מתחבר…';
+      lp.title = `תוצאות: ${scoresOk ? 'חי' : 'מתחבר'} · מחירים: ${pricesOk ? 'חי' : 'מתחבר'}`;
+    }
+    const snd = $('snd');
+    if (snd) {
+      const on = S.soundOn && audioOk() && !S.muted;
+      snd.textContent = on ? '🔔' : '🔕';
+      snd.title = on ? 'הצליל פועל · לחץ להשתקה' : 'הצליל כבוי · לחץ להפעלה';
+    }
+    const cta = $('cta');
+    if (cta) {
+      if (!S.soundOn || !audioOk()) { cta.hidden = false; cta.className = 'cta'; cta.textContent = (CAN_NOTIFY && Notification.permission === 'default') ? '🔔 לחץ כאן כדי להפעיל צליל והתראות' : '🔔 לחץ פעם אחת כדי להפעיל את הצליל'; }
+      else if (CAN_NOTIFY && Notification.permission === 'default') { cta.hidden = false; cta.className = 'cta soft'; cta.textContent = '💬 רוצה הודעה קופצת גם כשאתה בחלון אחר? לחץ כאן'; }
+      else cta.hidden = true;
     }
     document.querySelectorAll('.card[data-g]').forEach(c => {
-      const g = S.games.get(+c.dataset.g), dot = c.querySelector('.live');
+      const g = S.games.get(+c.dataset.g), dot = c.querySelector('.prow .dot');
       if (g && dot) dot.classList.toggle('on', pxFresh(g));
     });
-  }
-  function renderEnable() {
-    const b = $('enable'), t = $('test');
-    if (!S.soundOn) { b.className = 'cta'; b.textContent = CAN_NOTIFY ? '🔔 הפעל צליל והתראות' : '🔔 לחץ להפעלת צליל'; t.style.display = 'none'; return; }
-    const np = CAN_NOTIFY ? Notification.permission : 'na';
-    if (np === 'default') { b.className = 'cta'; b.textContent = '🔔 הפעל גם הודעות קופצות'; t.style.display = ''; return; }
-    b.className = 'cta on';
-    b.textContent = np === 'granted' ? '✅ צליל + התראות פעילים' : np === 'denied' ? '✅ צליל פעיל · התראות חסומות' : '✅ צליל פעיל';
-    t.style.display = '';
+    document.querySelectorAll('.ago[data-t]').forEach(el => { el.textContent = '🔔 ' + ago(+el.dataset.t); });
   }
   function render() {
     S.renderPending = false;
     syncSubs();
     const play = [...S.games.values()].filter(isPlay);
-    const hot = play.filter(qual).sort((x, y) => (y.alertAt || 0) - (x.alertAt || 0) || diffOf(y) - diffOf(x));
-    $('kLive').textContent = play.length;
+    const byMin = (x, y) => (parseInt(y.elapsed, 10) || (y.period === 'HT' ? 45 : 0)) - (parseInt(x.elapsed, 10) || (x.period === 'HT' ? 45 : 0));
+    const hot = play.filter(qual).sort((x, y) => (y.alertAt || 0) - (x.alertAt || 0) || diffOf(y) - diffOf(x) || byMin(x, y));
+    const warm = play.filter(warmQ).sort((x, y) => diffOf(y) - diffOf(x) || byMin(x, y));
+    const cold = play.filter(g => g.h === g.a).sort(byMin);
     $('kHot').textContent = hot.length;
-    $('kAlerts').textContent = S.alerts.length;
+    $('kWarm').textContent = warm.length;
+    $('kLive').textContent = play.length;
     $('thr').textContent = S.thr;
-    document.querySelectorAll('.thrTxt').forEach(el => { el.textContent = S.thr; });
-    $('hot').innerHTML = hot.length ? hot.map(cardHTML).join('') : `<div class="empty">אין כרגע משחק בפער ${S.thr}+ · הבוט מקשיב 👂</div>`;
-    const rows = play.slice().sort((x, y) => (qual(y) - qual(x)) || (diffOf(y) - diffOf(x)) || ((parseInt(y.elapsed, 10) || 0) - (parseInt(x.elapsed, 10) || 0)));
-    const warming = Date.now() - S.startedAt < WARMUP || S.snapState === 'loading';
-    $('all').innerHTML = rows.length ? rows.map(rowHTML).join('') : `<div class="empty">${warming ? 'אוסף משחקים חיים… (עד דקה)' : 'אין כרגע משחקי כדורגל חיים'}</div>`;
-    $('log').innerHTML = S.alerts.length
-      ? S.alerts.slice(0, 12).map(a => `<div>${hhmm(a.t)} · <bdi>${esc(a.text)}</bdi></div>`).join('')
-      : '<div style="color:var(--mut)">עוד אין התראות</div>';
-    renderStatus(); renderEnable();
+    document.querySelectorAll('.thrPlus').forEach(el => { el.textContent = S.thr + '+'; });
+    $('warmHint').textContent = `קבוצה מובילה, אבל עוד לא בפער של ${S.thr}`;
+    $('warmH').hidden = $('warm').hidden = S.thr === 1;
+    const loading = S.snapState !== 'ok' && S.snapState !== 'err' && Date.now() - S.startedAt < WARMUP;
+    const sk = '<div class="card sk-card"><div class="sk sk-l" style="width:45%"></div><div class="sk sk-b"></div><div class="sk sk-b"></div><div class="sk sk-p"></div></div>';
+    patch($('hot'), hot, cardKey, cardHTML, loading ? sk + sk : `<div class="empty listen"><div class="radar">⚽</div><div><b>הבוט מקשיב לכל המשחקים החיים</b><br>ברגע שקבוצה תוביל ב-${S.thr} שערים — תשמע צפצוף ותקבל הודעה.</div></div>`);
+    patch($('warm'), warm, rowKey, rowHTML, `<div class="empty">${loading ? 'טוען משחקים…' : 'אין כרגע משחק עם יתרון'}</div>`);
+    const cb = $('coldBtn'), cbox = $('cold');
+    cb.hidden = !cold.length;
+    cb.textContent = S.showCold ? '▴ הסתר משחקים בשוויון' : `⚪ עוד ${cold.length} משחקים בשוויון ▾`;
+    cbox.hidden = !S.showCold || !cold.length;
+    if (!cbox.hidden) patch(cbox, cold, rowKey, rowHTML, '');
+    const lb = $('logBtn'), lbox = $('log');
+    lb.hidden = !S.alerts.length;
+    lb.textContent = S.showLog ? '▴ הסתר היסטוריה' : `📜 היסטוריית התראות (${S.alerts.length}) ▾`;
+    lbox.hidden = !S.showLog || !S.alerts.length;
+    if (!lbox.hidden) lbox.innerHTML = S.alerts.slice(0, 15).map(a => `<div>${hhmm(a.t)} · <bdi>${esc(a.text)}</bdi></div>`).join('');
+    renderTools();
   }
-  function scheduleRender() { if (S.renderPending) return; S.renderPending = true; setTimeout(render, 300); }
+  function scheduleRender() { if (S.renderPending) return; S.renderPending = true; setTimeout(render, 250); }
   S.render = render;
 
   /* ---------- wiring ---------- */
   $('minus').onclick = () => setThr(S.thr - 1);
   $('plus').onclick = () => setThr(S.thr + 1);
-  $('enable').onclick = async () => {
-    S.soundOn = true; render();
-    await beep();
-    if (CAN_NOTIFY && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) {} }
-    render();
+  $('cta').onclick = () => enableAll();
+  $('snd').onclick = async () => {
+    if (!S.soundOn || !audioOk()) return enableAll();
+    S.muted = !S.muted; persist();
+    if (!S.muted) { await beep(true); toast('🔔 הצליל פועל'); } else toast('🔕 הצליל כבוי — הבאנר וההודעות ממשיכים');
+    renderTools();
   };
-  $('test').onclick = () => { beep(); };
+  $('coldBtn').onclick = () => { S.showCold = !S.showCold; render(); };
+  $('logBtn').onclick = () => { S.showLog = !S.showLog; render(); };
+  document.addEventListener('click', e => { if (e.target.closest && e.target.closest('a.card, a.row, .ab-go')) stopFlash(); }, true);
   document.addEventListener('pointerdown', () => { unlockAudio(); armTrap(); }, true);
   window.addEventListener('focus', stopFlash);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && document.hasFocus()) stopFlash(); });
@@ -688,7 +832,7 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     if (S.mws && S.mwsState === 'open' && now - S.mLastAny > 30e3) { try { S.mws.close(); } catch (e) {} }
     scheduleRender();
   }, 15e3));
-  S.timers.push(setInterval(renderStatus, 5e3));
+  S.timers.push(setInterval(renderTools, 5e3));
 
   try { if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)(); if (S.audio.state === 'running') S.soundOn = true; } catch (e) {}
   render();
@@ -697,7 +841,7 @@ footer{margin-top:28px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
   connectMkt();
   S.snapStart = Date.now();
   snapshot();
-  return 'bot2 started';
+  return 'bot2 v7 started';
 })();
 
 </script>
