@@ -66,11 +66,16 @@ a{color:inherit;text-decoration:none}
 a:focus-visible,button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .n,.gl,.pv,.pc,.min,.wv,.lv,.wp{font-variant-numeric:tabular-nums}
 .wrap{max-width:1040px;margin:0 auto;padding:28px 20px 48px}
-.top{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;padding-bottom:18px;border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:12px}
-.logo{width:46px;height:46px;border-radius:14px;background:var(--soft);border:1px solid var(--line);display:grid;place-items:center;font-size:26px}
-h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-.3px}
-.sub{margin:2px 0 0;color:var(--mut);font-size:14px}
+.top{padding-bottom:22px;border-bottom:1px solid var(--line)}
+.toprow{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.brand{display:flex;align-items:center;gap:8px;min-width:0}
+.bname{font-weight:800;font-size:16px;white-space:nowrap}
+.btag{color:var(--mut);font-size:14px;white-space:nowrap}
+.logo{width:36px;height:36px;border-radius:11px;background:var(--soft);border:1px solid var(--line);display:grid;place-items:center;font-size:20px;flex:none;margin-inline-end:2px}
+h1{margin:20px 0 0;font-size:32px;font-weight:800;letter-spacing:-.6px;line-height:1.25}
+h1 .nw{white-space:nowrap}
+.sub{margin:8px 0 0;color:var(--mut);font-size:15px;line-height:1.65;max-width:680px}
+.sub b{color:var(--ink);font-weight:600;white-space:nowrap}
 .tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .stepper{display:flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 12px;font-size:14px;color:var(--mut)}
 .stepper button{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:17px;cursor:pointer;line-height:1}
@@ -205,18 +210,22 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
 .ab-x{border:0;background:transparent;font-size:18px;cursor:pointer;color:var(--mut)}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#101828;color:#fff;padding:11px 18px;border-radius:12px;font-size:15px;opacity:0;transition:.25s;pointer-events:none;z-index:30}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-@media (max-width:640px){.wrap{padding:16px 12px 36px}h1{font-size:21px}.kpi .n{font-size:24px}.row{grid-template-columns:50px 1fr 56px auto}.lgc .lg{display:none}.ab{flex-wrap:wrap}.ab-tx{flex-basis:70%}}
+@media (max-width:640px){.wrap{padding:16px 12px 36px}h1{font-size:24px;margin-top:16px}.btag{display:none}.sub{font-size:14px}.kpi .n{font-size:24px}.row{grid-template-columns:50px 1fr 56px auto}.lgc .lg{display:none}.ab{flex-wrap:wrap}.ab-tx{flex-basis:70%}}
 `;
   const HTML = `<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="color-scheme" content="light"><title>${BASE_TITLE}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='88'%3E%E2%9A%BD%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap"><style>${CSS}</style></head>
 <body><div class="wrap">
 <header class="top">
-  <div class="brand"><div class="logo">⚽</div><div><h1>בוט 2 שערים</h1><p class="sub">מתריע כשקבוצה מובילה <span class="cond"></span> · כדורגל חי בפולימרקט</p></div></div>
-  <div class="tools">
-    <button id="snd" class="icon" title="צליל">🔔</button>
-    <div id="live" class="livepill" title=""><span class="dot"></span><span id="liveTx">מתחבר…</span></div>
+  <div class="toprow">
+    <div class="brand"><div class="logo">⚽</div><span class="bname">בוט 2 שערים</span><span class="btag">· כדורגל חי בפולימרקט</span></div>
+    <div class="tools">
+      <button id="snd" class="icon" title="צליל">🔔</button>
+      <div id="live" class="livepill" title=""><span class="dot"></span><span id="liveTx">מתחבר…</span></div>
+    </div>
   </div>
+  <h1 id="headline">קבוצה מובילה ב-2 שערים? <span class="nw">תקבל התראה מיד.</span></h1>
+  <p class="sub">יתרון גדול בדרך כלל מחזיק עד הסוף. הבוט עוקב בזמן אמת אחרי כל משחקי הכדורגל החיים בפולימרקט, ומראה את מחיר הקנייה של הקבוצה המובילה — כדי שתחליט מהר אם להיכנס. <b>הוא רק מתריע: לא קונה ולא מוכר.</b></p>
 </header>
 <section class="controls" aria-label="הגדרות התראה">
   <span class="lbl">התראה כש:</span>
@@ -240,9 +249,10 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
 <button id="logBtn" class="more" hidden></button>
 <section id="log" class="log" hidden></section>
 <details class="how"><summary>איך זה עובד?</summary><ul>
-<li>התוצאות מגיעות בזמן אמת מפולימרקט.</li>
-<li>כשקבוצה מגיעה לפער שבחרת — יש צפצוף, הודעה קופצת, והכרטיס עולה למעלה.</li>
-<li>ליד כל משחק: דגל המדינה ורמת המסגרת — ליגה ראשונה, ליגה שנייה, גביע, ליגת האלופות ועוד.</li>
+<li>התוצאות והמחירים מגיעים בזמן אמת מפולימרקט.</li>
+<li>בסרגל למעלה בוחרים: איזה פער, "ומעלה" או "פער מדויק", ומאיזו דקה.</li>
+<li>כשמשחק עומד בתנאי — יש צפצוף, הודעה קופצת, והכרטיס עולה למעלה.</li>
+<li>ליד כל משחק: לוגו הקבוצות, לוגו הליגה, דגל המדינה ורמת המסגרת — ליגה ראשונה, ליגה שנייה, גביע, ליגת האלופות ועוד.</li>
 <li>המחיר הוא מחיר הקנייה הכי זול עכשיו של "כן, הקבוצה המובילה תנצח", ישר מספר הפקודות.</li>
 <li>אם הקבוצה מנצחת, כל מניה שווה $1. כלומר: קונים ב-87¢ → מנצחת = +13¢ (+15%), לא מנצחת = מפסידים את ה-87¢.</li>
 <li>הבוט רק מתריע — לא קונה ולא מוכר.</li></ul></details>
@@ -920,6 +930,7 @@ footer{margin-top:24px;color:var(--mut);font-size:13px;line-height:1.8;text-alig
     $('kLive').textContent = play.length;
     $('thr').textContent = S.thr;
     document.querySelectorAll('.cond').forEach(el => { el.innerHTML = condHTML(); });
+    $('headline').innerHTML = `קבוצה מובילה ${S.thr === 1 ? 'בשער אחד' : `ב-${S.thr} שערים`}? <span class="nw">תקבל התראה מיד.</span>`;
     $('warmHint').textContent = S.minFrom ? `קבוצה מובילה, אבל עוד לא עומד בתנאי (פער או דקה)` : `קבוצה מובילה, אבל עוד לא עומד בתנאי`;
     $('exOff').className = S.exact ? '' : 'on'; $('exOn').className = S.exact ? 'on' : '';
     $('minSel').value = String(S.minFrom);
